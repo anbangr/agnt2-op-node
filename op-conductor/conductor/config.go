@@ -106,6 +106,8 @@ type Config struct {
 	MetricsConfig opmetrics.CLIConfig
 	PprofConfig   oppprof.CLIConfig
 	RPC           oprpc.CLIConfig
+
+	HTTPBodyLimitMB int
 }
 
 // Check validates the CLIConfig.
@@ -148,6 +150,9 @@ func (c *Config) Check() error {
 	}
 	if err := c.RPC.Check(); err != nil {
 		return errors.Wrap(err, "invalid rpc config")
+	}
+	if c.HTTPBodyLimitMB < 5 {
+		return fmt.Errorf("HTTP body limit must be at least 5MB, got %dMB", c.HTTPBodyLimitMB)
 	}
 	return nil
 }
@@ -214,6 +219,7 @@ func NewConfig(ctx *cli.Context, log log.Logger) (*Config, error) {
 		MetricsConfig:       opmetrics.ReadCLIConfig(ctx),
 		PprofConfig:         oppprof.ReadCLIConfig(ctx),
 		RPC:                 oprpc.ReadCLIConfig(ctx),
+		HTTPBodyLimitMB:     ctx.Int(flags.HTTPBodyLimitMB.Name),
 	}, nil
 }
 
