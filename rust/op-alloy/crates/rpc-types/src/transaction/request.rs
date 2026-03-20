@@ -6,7 +6,7 @@ use alloy_eips::eip7702::SignedAuthorization;
 use alloy_network_primitives::TransactionBuilder7702;
 use alloy_primitives::{Address, Signature, TxKind, U256};
 use alloy_rpc_types_eth::{AccessList, TransactionInput, TransactionRequest};
-use op_alloy_consensus::{OpTxEnvelope, OpTypedTransaction, TxDeposit};
+use op_alloy_consensus::{OpTxEnvelope, OpTypedTransaction, SDM_TX_TYPE_ID, TxDeposit, TxSdm};
 use serde::{Deserialize, Serialize};
 
 /// Builder for [`OpTypedTransaction`].
@@ -156,6 +156,26 @@ impl From<Sealed<TxDeposit>> for OpTransactionRequest {
     }
 }
 
+impl From<TxSdm> for OpTransactionRequest {
+    fn from(tx: TxSdm) -> Self {
+        Self(TransactionRequest {
+            from: Some(Address::ZERO),
+            transaction_type: Some(SDM_TX_TYPE_ID as u8),
+            gas: Some(0),
+            nonce: Some(0),
+            value: Some(U256::ZERO),
+            input: tx.payload.to_rlp_bytes().into(),
+            ..Default::default()
+        })
+    }
+}
+
+impl From<Sealed<TxSdm>> for OpTransactionRequest {
+    fn from(value: Sealed<TxSdm>) -> Self {
+        value.into_inner().into()
+    }
+}
+
 impl<T> From<Signed<T, Signature>> for OpTransactionRequest
 where
     T: SignableTransaction<Signature> + Into<TransactionRequest>,
@@ -180,6 +200,7 @@ impl From<OpTypedTransaction> for OpTransactionRequest {
             OpTypedTransaction::Eip2930(tx) => Self(tx.into()),
             OpTypedTransaction::Eip1559(tx) => Self(tx.into()),
             OpTypedTransaction::Eip7702(tx) => Self(tx.into()),
+            OpTypedTransaction::Sdm(tx) => tx.into(),
             OpTypedTransaction::Deposit(tx) => tx.into(),
         }
     }
@@ -191,8 +212,9 @@ impl From<OpTxEnvelope> for OpTransactionRequest {
             OpTxEnvelope::Eip2930(tx) => tx.into(),
             OpTxEnvelope::Eip1559(tx) => tx.into(),
             OpTxEnvelope::Eip7702(tx) => tx.into(),
+            OpTxEnvelope::Sdm(tx) => tx.into(),
             OpTxEnvelope::Deposit(tx) => tx.into(),
-            _ => Default::default(),
+            OpTxEnvelope::Legacy(tx) => tx.into(),
         }
     }
 }

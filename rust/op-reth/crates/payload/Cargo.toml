@@ -28,7 +28,7 @@ reth-basic-payload-builder.workspace = true
 reth-payload-validator.workspace = true
 
 # op-reth
-reth-optimism-evm.workspace = true
+reth-optimism-evm = { workspace = true, features = ["std"] }
 reth-optimism-forks.workspace = true
 reth-optimism-primitives.workspace = true
 reth-optimism-txpool.workspace = true

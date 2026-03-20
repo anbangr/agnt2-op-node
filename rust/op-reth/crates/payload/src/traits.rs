@@ -1,4 +1,5 @@
-use alloy_consensus::BlockBody;
+use alloy_consensus::{BlockBody, Sealed};
+use op_alloy_consensus::TxSdm;
 use reth_optimism_primitives::{DepositReceipt, transaction::OpTransaction};
 use reth_payload_primitives::PayloadBuilderAttributes;
 use reth_primitives_traits::{FullBlockHeader, NodePrimitives, SignedTransaction, WithEncoded};
@@ -6,6 +7,9 @@ use reth_primitives_traits::{FullBlockHeader, NodePrimitives, SignedTransaction,
 use crate::OpPayloadBuilderAttributes;
 
 /// Helper trait to encapsulate common bounds on [`NodePrimitives`] for OP payload builder.
+///
+/// Note: `From<Sealed<TxSdm>>` on `_TX` is required to construct SDM
+/// synthetic transactions during payload building.
 pub trait OpPayloadPrimitives:
     NodePrimitives<
         Receipt: DepositReceipt,
@@ -15,14 +19,14 @@ pub trait OpPayloadPrimitives:
     >
 {
     /// Helper AT to bound [`NodePrimitives::Block`] type without causing bound cycle.
-    type _TX: SignedTransaction + OpTransaction;
+    type _TX: SignedTransaction + OpTransaction + From<Sealed<TxSdm>>;
     /// Helper AT to bound [`NodePrimitives::Block`] type without causing bound cycle.
     type _Header: FullBlockHeader;
 }
 
 impl<Tx, T, Header> OpPayloadPrimitives for T
 where
-    Tx: SignedTransaction + OpTransaction,
+    Tx: SignedTransaction + OpTransaction + From<Sealed<TxSdm>>,
     T: NodePrimitives<
             SignedTx = Tx,
             Receipt: DepositReceipt,

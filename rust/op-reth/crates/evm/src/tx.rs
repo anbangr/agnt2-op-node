@@ -1,14 +1,14 @@
 //! [`OpTx`] newtype wrapper around [`OpTransaction<TxEnv>`].
 
 use alloy_consensus::{
-    Signed, TxEip1559, TxEip2930, TxEip4844, TxEip4844Variant, TxEip7702, TxLegacy,
+    Sealed, Signed, TxEip1559, TxEip2930, TxEip4844, TxEip4844Variant, TxEip7702, TxLegacy,
 };
 use alloy_eips::{Encodable2718, Typed2718, eip7594::Encodable7594};
 use alloy_evm::{FromRecoveredTx, FromTxWithEncoded, IntoTxEnv};
 use alloy_op_evm::block::OpTxEnv;
 use alloy_primitives::{Address, B256, Bytes, TxKind, U256};
 use core::ops::{Deref, DerefMut};
-use op_alloy_consensus::{OpTxEnvelope, TxDeposit};
+use op_alloy_consensus::{OpTxEnvelope, TxDeposit, TxSdm};
 use op_revm::{OpTransaction, transaction::deposit::DepositTransactionParts};
 use reth_evm::TransactionEnv;
 use revm::context::TxEnv;
@@ -133,10 +133,12 @@ impl FromTxWithEncoded<OpTxEnvelope> for OpTx {
             OpTxEnvelope::Eip1559(tx) => Self::from_encoded_tx(tx, caller, encoded),
             OpTxEnvelope::Eip2930(tx) => Self::from_encoded_tx(tx, caller, encoded),
             OpTxEnvelope::Eip7702(tx) => Self::from_encoded_tx(tx, caller, encoded),
+            OpTxEnvelope::Sdm(tx) => Self::from_encoded_tx(tx.inner(), caller, encoded),
             OpTxEnvelope::Deposit(tx) => Self::from_encoded_tx(tx.inner(), caller, encoded),
         }
     }
 }
+
 
 /// Generates [`FromRecoveredTx`] and [`FromTxWithEncoded`] impls for [`OpTx`] from a
 /// `Signed<$tx>` and bare `$tx` type. The bare type conversion creates the [`TxEnv`] via
@@ -195,6 +197,33 @@ impl<T> FromTxWithEncoded<TxEip4844Variant<T>> for OpTx {
     fn from_encoded_tx(tx: &TxEip4844Variant<T>, caller: Address, encoded: Bytes) -> Self {
         let base = TxEnv::from_recovered_tx(tx, caller);
         Self(OpTransaction { base, enveloped_tx: Some(encoded), deposit: Default::default() })
+    }
+}
+
+impl FromRecoveredTx<TxSdm> for OpTx {
+    fn from_recovered_tx(tx: &TxSdm, sender: Address) -> Self {
+        let encoded = tx.encoded_2718();
+        Self::from_encoded_tx(tx, sender, encoded.into())
+    }
+}
+
+impl FromTxWithEncoded<TxSdm> for OpTx {
+    fn from_encoded_tx(tx: &TxSdm, caller: Address, encoded: Bytes) -> Self {
+        let base = TxEnv::from_recovered_tx(tx, caller);
+        Self(OpTransaction { base, enveloped_tx: Some(encoded), deposit: Default::default() })
+    }
+}
+
+impl FromRecoveredTx<Sealed<TxSdm>> for OpTx {
+    fn from_recovered_tx(tx: &Sealed<TxSdm>, sender: Address) -> Self {
+        let encoded = tx.encoded_2718();
+        Self::from_encoded_tx(tx, sender, encoded.into())
+    }
+}
+
+impl FromTxWithEncoded<Sealed<TxSdm>> for OpTx {
+    fn from_encoded_tx(tx: &Sealed<TxSdm>, caller: Address, encoded: Bytes) -> Self {
+        Self::from_encoded_tx(tx.inner(), caller, encoded)
     }
 }
 

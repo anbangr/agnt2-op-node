@@ -1,6 +1,6 @@
 //! Additional compatibility implementations.
 
-use crate::{DEPOSIT_TX_TYPE_ID, OpTxEnvelope, TxDeposit};
+use crate::{DEPOSIT_TX_TYPE_ID, OpTxEnvelope, SDM_TX_TYPE_ID, TxDeposit, TxSdm};
 use alloc::string::ToString;
 use alloy_consensus::Sealed;
 use alloy_eips::Typed2718;
@@ -21,6 +21,28 @@ impl TryFrom<UnknownTypedTransaction> for TxDeposit {
 
     fn try_from(value: UnknownTypedTransaction) -> Result<Self, Self::Error> {
         if !value.is_type(DEPOSIT_TX_TYPE_ID) {
+            return Err(ConversionError::Custom("invalid transaction type".to_string()));
+        }
+        value
+            .fields
+            .deserialize_into()
+            .map_err(|_| ConversionError::Custom("invalid transaction data".to_string()))
+    }
+}
+
+impl TryFrom<UnknownTxEnvelope> for TxSdm {
+    type Error = ConversionError;
+
+    fn try_from(value: UnknownTxEnvelope) -> Result<Self, Self::Error> {
+        value.inner.try_into()
+    }
+}
+
+impl TryFrom<UnknownTypedTransaction> for TxSdm {
+    type Error = ConversionError;
+
+    fn try_from(value: UnknownTypedTransaction) -> Result<Self, Self::Error> {
+        if !value.is_type(SDM_TX_TYPE_ID) {
             return Err(ConversionError::Custom("invalid transaction type".to_string()));
         }
         value
@@ -56,7 +78,11 @@ impl TryFrom<AnyRpcTransaction> for OpTxEnvelope {
                     .fields
                     .insert_value("from".to_string(), from)
                     .map_err(|err| ConversionError::Custom(err.to_string()))?;
-                Ok(Self::Deposit(Sealed::new(tx.try_into()?)))
+                if let Ok(sdm) = tx.clone().try_into() {
+                    Ok(Self::Sdm(Sealed::new(sdm)))
+                } else {
+                    Ok(Self::Deposit(Sealed::new(tx.try_into()?)))
+                }
             }
         }
     }

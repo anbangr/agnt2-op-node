@@ -222,6 +222,9 @@ impl NetworkWallet<Optimism> for EthereumWallet {
             OpTypedTransaction::Eip2930(tx) => TypedTransaction::Eip2930(tx),
             OpTypedTransaction::Eip1559(tx) => TypedTransaction::Eip1559(tx),
             OpTypedTransaction::Eip7702(tx) => TypedTransaction::Eip7702(tx),
+            OpTypedTransaction::Sdm(_) => {
+                return Err(alloy_signer::Error::other("not implemented for SDM tx"));
+            }
             OpTypedTransaction::Deposit(_) => {
                 return Err(alloy_signer::Error::other("not implemented for deposit tx"));
             }

@@ -33,7 +33,10 @@ use op_revm::{
 use revm::{
     Context, ExecuteEvm, InspectEvm, Inspector, SystemCallEvm,
     context::{BlockEnv, TxEnv},
-    context_interface::result::{EVMError, ResultAndState},
+    context_interface::{
+        JournalTr,
+        result::{EVMError, ResultAndState},
+    },
     handler::{PrecompileProvider, instructions::EthInstructions},
     inspector::NoOpInspector,
     interpreter::{InterpreterResult, interpreter::EthInterpreter},
@@ -41,6 +44,8 @@ use revm::{
 
 pub mod block;
 pub use block::{OpBlockExecutionCtx, OpBlockExecutor, OpBlockExecutorFactory};
+
+pub mod sdm;
 
 /// OP EVM implementation.
 ///
@@ -56,6 +61,7 @@ pub use block::{OpBlockExecutionCtx, OpBlockExecutor, OpBlockExecutorFactory};
 pub struct OpEvm<DB: Database, I, P = OpPrecompiles, Tx = OpTransaction<TxEnv>> {
     inner: op_revm::OpEvm<OpContext<DB>, I, EthInstructions<EthInterpreter, OpContext<DB>>, P>,
     inspect: bool,
+    last_tx_warming_savings: u64,
     _tx: PhantomData<Tx>,
 }
 
@@ -80,7 +86,12 @@ impl<DB: Database, I, P, Tx> OpEvm<DB, I, P, Tx> {
         evm: op_revm::OpEvm<OpContext<DB>, I, EthInstructions<EthInterpreter, OpContext<DB>>, P>,
         inspect: bool,
     ) -> Self {
-        Self { inner: evm, inspect, _tx: PhantomData }
+        Self { inner: evm, inspect, last_tx_warming_savings: 0, _tx: PhantomData }
+    }
+
+    /// Take the warming savings recorded for the most recently executed transaction.
+    pub fn take_last_tx_warming_savings(&mut self) -> u64 {
+        core::mem::take(&mut self.last_tx_warming_savings)
     }
 }
 
@@ -128,13 +139,22 @@ where
         &mut self,
         tx: Self::Tx,
     ) -> Result<ResultAndState<Self::HaltReason>, Self::Error> {
+        self.last_tx_warming_savings = 0;
+
         let inner_tx: OpTransaction<TxEnv> = tx.into();
         let result = if self.inspect {
-            self.inner.inspect_tx(inner_tx)
+            self.inner.inspect_one_tx(inner_tx)
         } else {
-            self.inner.transact(inner_tx)
+            self.inner.transact_one(inner_tx)
         };
-        result.map_err(map_op_err)
+
+        self.last_tx_warming_savings =
+            self.inner.0.ctx.journaled_state.take_last_tx_warming_savings();
+
+        let state = self.inner.finalize();
+
+        let result = result.map_err(map_op_err)?;
+        Ok(ResultAndState::new(result, state))
     }
 
     fn transact_system_call(
@@ -214,18 +234,17 @@ where
         input: EvmEnv<OpSpecId>,
     ) -> Self::Evm<DB, NoOpInspector> {
         let spec_id = input.cfg_env.spec;
-        OpEvm {
-            inner: Context::op()
-                .with_db(db)
-                .with_block(input.block_env)
-                .with_cfg(input.cfg_env)
-                .build_op_with_inspector(NoOpInspector {})
-                .with_precompiles(PrecompilesMap::from_static(
-                    OpPrecompiles::new_with_spec(spec_id).precompiles(),
-                )),
-            inspect: false,
-            _tx: PhantomData,
-        }
+        let mut inner = Context::op()
+            .with_db(db)
+            .with_block(input.block_env)
+            .with_cfg(input.cfg_env)
+            .build_op_with_inspector(NoOpInspector {})
+            .with_precompiles(PrecompilesMap::from_static(
+                OpPrecompiles::new_with_spec(spec_id).precompiles(),
+            ));
+        inner.0.ctx.journaled_state.enable_persistent_warming();
+
+        OpEvm { inner, inspect: false, last_tx_warming_savings: 0, _tx: PhantomData }
     }
 
     fn create_evm_with_inspector<DB: Database, I: Inspector<Self::Context<DB>>>(
@@ -235,18 +254,17 @@ where
         inspector: I,
     ) -> Self::Evm<DB, I> {
         let spec_id = input.cfg_env.spec;
-        OpEvm {
-            inner: Context::op()
-                .with_db(db)
-                .with_block(input.block_env)
-                .with_cfg(input.cfg_env)
-                .build_op_with_inspector(inspector)
-                .with_precompiles(PrecompilesMap::from_static(
-                    OpPrecompiles::new_with_spec(spec_id).precompiles(),
-                )),
-            inspect: true,
-            _tx: PhantomData,
-        }
+        let mut inner = Context::op()
+            .with_db(db)
+            .with_block(input.block_env)
+            .with_cfg(input.cfg_env)
+            .build_op_with_inspector(inspector)
+            .with_precompiles(PrecompilesMap::from_static(
+                OpPrecompiles::new_with_spec(spec_id).precompiles(),
+            ));
+        inner.0.ctx.journaled_state.enable_persistent_warming();
+
+        OpEvm { inner, inspect: true, last_tx_warming_savings: 0, _tx: PhantomData }
     }
 }
 

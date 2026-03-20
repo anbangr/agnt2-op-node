@@ -1,5 +1,5 @@
 use crate::{
-    OpPooledTransaction, TxDeposit,
+    OpPooledTransaction, TxDeposit, TxSdm,
     transaction::{OpDepositInfo, OpTransactionInfo},
 };
 use alloy_consensus::{
@@ -37,9 +37,11 @@ pub enum OpTxEnvelope {
     /// A [`TxEip7702`] tagged with type 4.
     #[envelope(ty = 4)]
     Eip7702(Signed<TxEip7702>),
+    /// A [`TxSdm`] tagged with type 0x7D.
+    #[envelope(ty = 125)]
+    Sdm(Sealed<TxSdm>),
     /// A [`TxDeposit`] tagged with type 0x7E.
     #[envelope(ty = 126)]
-    #[serde(serialize_with = "crate::serde_deposit_tx_rpc")]
     Deposit(Sealed<TxDeposit>),
 }
 
@@ -120,6 +122,12 @@ impl From<TxDeposit> for OpTxEnvelope {
     }
 }
 
+impl From<TxSdm> for OpTxEnvelope {
+    fn from(v: TxSdm) -> Self {
+        v.seal_slow().into()
+    }
+}
+
 impl From<Signed<OpTypedTransaction>> for OpTxEnvelope {
     fn from(value: Signed<OpTypedTransaction>) -> Self {
         let (tx, sig, hash) = value.into_parts();
@@ -140,6 +148,7 @@ impl From<Signed<OpTypedTransaction>> for OpTxEnvelope {
                 let tx = Signed::new_unchecked(tx_eip7702, sig, hash);
                 Self::Eip7702(tx)
             }
+            OpTypedTransaction::Sdm(tx) => Self::Sdm(Sealed::new_unchecked(tx, hash)),
             OpTypedTransaction::Deposit(tx) => Self::Deposit(Sealed::new_unchecked(tx, hash)),
         }
     }
@@ -154,6 +163,12 @@ impl From<(OpTypedTransaction, Signature)> for OpTxEnvelope {
 impl From<Sealed<TxDeposit>> for OpTxEnvelope {
     fn from(v: Sealed<TxDeposit>) -> Self {
         Self::Deposit(v)
+    }
+}
+
+impl From<Sealed<TxSdm>> for OpTxEnvelope {
+    fn from(v: Sealed<TxSdm>) -> Self {
+        Self::Sdm(v)
     }
 }
 
@@ -186,6 +201,7 @@ impl From<OpTxEnvelope> for alloy_rpc_types_eth::TransactionRequest {
             OpTxEnvelope::Eip2930(tx) => tx.into_parts().0.into(),
             OpTxEnvelope::Eip1559(tx) => tx.into_parts().0.into(),
             OpTxEnvelope::Eip7702(tx) => tx.into_parts().0.into(),
+            OpTxEnvelope::Sdm(tx) => tx.into_inner().into(),
             OpTxEnvelope::Deposit(tx) => tx.into_inner().into(),
             OpTxEnvelope::Legacy(tx) => tx.into_parts().0.into(),
         }
@@ -249,6 +265,7 @@ impl OpTxEnvelope {
             Self::Eip2930(tx) => Ok(tx.into()),
             Self::Eip1559(tx) => Ok(tx.into()),
             Self::Eip7702(tx) => Ok(tx.into()),
+            tx @ Self::Sdm(_) => Err(ValueError::new(tx, "SDM transactions cannot be pooled")),
             Self::Deposit(tx) => {
                 Err(ValueError::new(tx.into(), "Deposit transactions cannot be pooled"))
             }
@@ -274,6 +291,10 @@ impl OpTxEnvelope {
             Self::Eip2930(tx) => Ok(tx.into()),
             Self::Eip1559(tx) => Ok(tx.into()),
             Self::Eip7702(tx) => Ok(tx.into()),
+            tx @ Self::Sdm(_) => Err(ValueError::new(
+                tx,
+                "SDM transactions cannot be converted to ethereum transaction",
+            )),
             tx @ Self::Deposit(_) => Err(ValueError::new(
                 tx,
                 "Deposit transactions cannot be converted to ethereum transaction",
@@ -323,6 +344,7 @@ impl OpTxEnvelope {
             Self::Eip2930(tx) => &mut tx.tx_mut().input,
             Self::Legacy(tx) => &mut tx.tx_mut().input,
             Self::Eip7702(tx) => &mut tx.tx_mut().input,
+            Self::Sdm(_) => panic!("SDM transactions do not have mutable input bytes"),
             Self::Deposit(tx) => &mut tx.inner_mut().input,
         }
     }
@@ -341,14 +363,23 @@ impl OpTxEnvelope {
             }
             Err(err) => match err.into_value() {
                 alloy_network::AnyTxEnvelope::Unknown(unknown) => {
-                    let Ok(deposit) = unknown.inner.clone().try_into() else {
-                        return Err(alloy_network::AnyTxEnvelope::Unknown(unknown));
+                    let Ok(sdm) = unknown.inner.clone().try_into() else {
+                        let Ok(deposit) = unknown.inner.clone().try_into() else {
+                            return Err(alloy_network::AnyTxEnvelope::Unknown(unknown));
+                        };
+                        return Ok(Self::Deposit(Sealed::new_unchecked(deposit, unknown.hash)));
                     };
-                    Ok(Self::Deposit(Sealed::new_unchecked(deposit, unknown.hash)))
+                    Ok(Self::Sdm(Sealed::new_unchecked(sdm, unknown.hash)))
                 }
                 unsupported => Err(unsupported),
             },
         }
+    }
+
+    /// Returns true if the transaction is an SDM transaction.
+    #[inline]
+    pub const fn is_sdm(&self) -> bool {
+        matches!(self, Self::Sdm(_))
     }
 
     /// Returns true if the transaction is a deposit transaction.
@@ -381,7 +412,15 @@ impl OpTxEnvelope {
         }
     }
 
-    /// Returns the [`TxEip1559`] variant if the transaction is an EIP-1559 transaction.
+    /// Returns the [`TxSdm`] variant if the transaction is an SDM transaction.
+    pub const fn as_sdm(&self) -> Option<&Sealed<TxSdm>> {
+        match self {
+            Self::Sdm(tx) => Some(tx),
+            _ => None,
+        }
+    }
+
+    /// Returns the [`TxDeposit`] variant if the transaction is a deposit transaction.
     pub const fn as_deposit(&self) -> Option<&Sealed<TxDeposit>> {
         match self {
             Self::Deposit(tx) => Some(tx),
@@ -391,13 +430,14 @@ impl OpTxEnvelope {
 
     /// Return the reference to signature.
     ///
-    /// Returns `None` if this is a deposit variant.
+    /// Returns `None` if this is an SDM or deposit variant.
     pub const fn signature(&self) -> Option<&Signature> {
         match self {
             Self::Legacy(tx) => Some(tx.signature()),
             Self::Eip2930(tx) => Some(tx.signature()),
             Self::Eip1559(tx) => Some(tx.signature()),
             Self::Eip7702(tx) => Some(tx.signature()),
+            Self::Sdm(_) => None,
             Self::Deposit(_) => None,
         }
     }
@@ -409,6 +449,7 @@ impl OpTxEnvelope {
             Self::Eip2930(_) => OpTxType::Eip2930,
             Self::Eip1559(_) => OpTxType::Eip1559,
             Self::Eip7702(_) => OpTxType::Eip7702,
+            Self::Sdm(_) => OpTxType::Sdm,
             Self::Deposit(_) => OpTxType::Deposit,
         }
     }
@@ -420,6 +461,7 @@ impl OpTxEnvelope {
             Self::Eip1559(tx) => tx.hash(),
             Self::Eip2930(tx) => tx.hash(),
             Self::Eip7702(tx) => tx.hash(),
+            Self::Sdm(tx) => tx.hash_ref(),
             Self::Deposit(tx) => tx.hash_ref(),
         }
     }
@@ -429,13 +471,14 @@ impl OpTxEnvelope {
         *self.hash()
     }
 
-    /// Return the length of the inner txn, including type byte length
+    /// Return the length of the inner txn, including type byte length.
     pub fn eip2718_encoded_length(&self) -> usize {
         match self {
             Self::Legacy(t) => t.eip2718_encoded_length(),
             Self::Eip2930(t) => t.eip2718_encoded_length(),
             Self::Eip1559(t) => t.eip2718_encoded_length(),
             Self::Eip7702(t) => t.eip2718_encoded_length(),
+            Self::Sdm(t) => t.eip2718_encoded_length(),
             Self::Deposit(t) => t.eip2718_encoded_length(),
         }
     }
@@ -457,6 +500,7 @@ impl alloy_consensus::transaction::SignerRecoverable for OpTxEnvelope {
             Self::Eip2930(tx) => tx.signature_hash(),
             Self::Eip1559(tx) => tx.signature_hash(),
             Self::Eip7702(tx) => tx.signature_hash(),
+            Self::Sdm(_) => return Ok(alloy_primitives::Address::ZERO),
             // Optimism's Deposit transaction does not have a signature. Directly return the
             // `from` address.
             Self::Deposit(tx) => return Ok(tx.from),
@@ -466,6 +510,7 @@ impl alloy_consensus::transaction::SignerRecoverable for OpTxEnvelope {
             Self::Eip2930(tx) => tx.signature(),
             Self::Eip1559(tx) => tx.signature(),
             Self::Eip7702(tx) => tx.signature(),
+            Self::Sdm(_) => unreachable!("SDM transactions should not be handled here"),
             Self::Deposit(_) => unreachable!("Deposit transactions should not be handled here"),
         };
         alloy_consensus::crypto::secp256k1::recover_signer(signature, signature_hash)
@@ -479,6 +524,7 @@ impl alloy_consensus::transaction::SignerRecoverable for OpTxEnvelope {
             Self::Eip2930(tx) => tx.signature_hash(),
             Self::Eip1559(tx) => tx.signature_hash(),
             Self::Eip7702(tx) => tx.signature_hash(),
+            Self::Sdm(_) => return Ok(alloy_primitives::Address::ZERO),
             // Optimism's Deposit transaction does not have a signature. Directly return the
             // `from` address.
             Self::Deposit(tx) => return Ok(tx.from),
@@ -488,6 +534,7 @@ impl alloy_consensus::transaction::SignerRecoverable for OpTxEnvelope {
             Self::Eip2930(tx) => tx.signature(),
             Self::Eip1559(tx) => tx.signature(),
             Self::Eip7702(tx) => tx.signature(),
+            Self::Sdm(_) => unreachable!("SDM transactions should not be handled here"),
             Self::Deposit(_) => unreachable!("Deposit transactions should not be handled here"),
         };
         alloy_consensus::crypto::secp256k1::recover_signer_unchecked(signature, signature_hash)
@@ -510,6 +557,7 @@ impl alloy_consensus::transaction::SignerRecoverable for OpTxEnvelope {
             Self::Eip7702(tx) => {
                 alloy_consensus::transaction::SignerRecoverable::recover_unchecked_with_buf(tx, buf)
             }
+            Self::Sdm(_) => Ok(alloy_primitives::Address::ZERO),
             Self::Deposit(tx) => Ok(tx.from),
         }
     }
@@ -518,7 +566,7 @@ impl alloy_consensus::transaction::SignerRecoverable for OpTxEnvelope {
 /// Bincode-compatible serde implementation for `OpTxEnvelope`.
 #[cfg(all(feature = "serde", feature = "serde-bincode-compat"))]
 pub mod serde_bincode_compat {
-    use crate::serde_bincode_compat::TxDeposit;
+    use crate::{TxSdm, serde_bincode_compat::TxDeposit};
     use alloy_consensus::{
         Sealed, Signed,
         transaction::serde_bincode_compat::{TxEip1559, TxEip2930, TxEip7702, TxLegacy},
@@ -558,6 +606,13 @@ pub mod serde_bincode_compat {
             /// Borrowed EIP-7702 transaction data.
             transaction: TxEip7702<'a>,
         },
+        /// SDM variant.
+        Sdm {
+            /// Precomputed hash.
+            hash: B256,
+            /// Owned SDM transaction data.
+            transaction: TxSdm,
+        },
         /// Deposit variant.
         Deposit {
             /// Precomputed hash.
@@ -586,6 +641,10 @@ pub mod serde_bincode_compat {
                     signature: *signed_7702.signature(),
                     transaction: signed_7702.tx().into(),
                 },
+                super::OpTxEnvelope::Sdm(sealed_sdm) => Self::Sdm {
+                    hash: sealed_sdm.seal(),
+                    transaction: sealed_sdm.inner().clone(),
+                },
                 super::OpTxEnvelope::Deposit(sealed_deposit) => Self::Deposit {
                     hash: sealed_deposit.seal(),
                     transaction: sealed_deposit.inner().into(),
@@ -608,6 +667,9 @@ pub mod serde_bincode_compat {
                 }
                 OpTxEnvelope::Eip7702 { signature, transaction } => {
                     Self::Eip7702(Signed::new_unhashed(transaction.into(), signature))
+                }
+                OpTxEnvelope::Sdm { hash, transaction } => {
+                    Self::Sdm(Sealed::new_unchecked(transaction, hash))
                 }
                 OpTxEnvelope::Deposit { hash, transaction } => {
                     Self::Deposit(Sealed::new_unchecked(transaction.into(), hash))

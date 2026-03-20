@@ -267,9 +267,7 @@ dependencies = [
 
 [[package]]
 name = "alloy-evm"
-version = "0.27.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b991c370ce44e70a3a9e474087e3d65e42e66f967644ad729dc4cec09a21fd09"
+version = "0.27.2"
 dependencies = [
  "alloy-consensus",
  "alloy-eips",
@@ -9506,7 +9504,6 @@ dependencies = [
 [[package]]
 name = "reth-codecs"
 version = "1.11.3"
-source = "git+https://github.com/paradigmxyz/reth?tag=v1.11.3#d6324d63e27ef6b7c49cdc9b1977c1b808234c7b"
 dependencies = [
  "alloy-consensus",
  "alloy-eips",
@@ -11486,6 +11483,7 @@ dependencies = [
  "reth-optimism-forks",
  "reth-optimism-payload-builder",
  "reth-optimism-primitives",
+ "reth-optimism-sdm-replay",
  "reth-optimism-trie",
  "reth-optimism-txpool",
  "reth-payload-util",
@@ -11510,6 +11508,25 @@ dependencies = [
  "tokio-stream",
  "tower 0.5.3",
  "tracing",
+]
+
+[[package]]
+name = "reth-optimism-sdm-replay"
+version = "1.11.2"
+dependencies = [
+ "alloy-consensus",
+ "alloy-eips",
+ "alloy-primitives",
+ "op-alloy-consensus",
+ "reth-evm",
+ "reth-execution-errors",
+ "reth-optimism-evm",
+ "reth-optimism-primitives",
+ "reth-primitives-traits",
+ "revm",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
 ]
 
 [[package]]
@@ -11699,7 +11716,6 @@ dependencies = [
 [[package]]
 name = "reth-primitives-traits"
 version = "1.11.3"
-source = "git+https://github.com/paradigmxyz/reth?tag=v1.11.3#d6324d63e27ef6b7c49cdc9b1977c1b808234c7b"
 dependencies = [
  "alloy-consensus",
  "alloy-eips",
@@ -12610,8 +12626,6 @@ dependencies = [
 [[package]]
 name = "revm-context"
 version = "13.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "892ff3e6a566cf8d72ffb627fdced3becebbd9ba64089c25975b9b028af326a5"
 dependencies = [
  "bitvec",
  "cfg-if",
@@ -12627,8 +12641,6 @@ dependencies = [
 [[package]]
 name = "revm-context-interface"
 version = "14.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "57f61cc6d23678c4840af895b19f8acfbbd546142ec8028b6526c53cc1c16c98"
 dependencies = [
  "alloy-eip2930",
  "alloy-eip7702",

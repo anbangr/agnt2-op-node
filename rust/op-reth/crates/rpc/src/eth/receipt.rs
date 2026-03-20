@@ -2,16 +2,22 @@
 
 use crate::{OpEthApi, OpEthApiError, eth::RpcNodeCore};
 use alloy_consensus::{BlockHeader, Receipt, ReceiptWithBloom, TxReceipt};
-use alloy_eips::eip2718::Encodable2718;
+use alloy_eips::{
+    Typed2718,
+    eip2718::{Decodable2718, Encodable2718},
+};
 use alloy_rpc_types_eth::{Log, TransactionReceipt};
-use op_alloy_consensus::{OpReceipt, OpTransaction};
+use op_alloy_consensus::{
+    OpReceipt, OpTransaction, TxSdm,
+    sdm::{SDM_TX_TYPE_ID, SDMPayload, extract_sdm_payload_from_tx},
+};
 use op_alloy_rpc_types::{L1BlockInfo, OpTransactionReceipt, OpTransactionReceiptFields};
 use op_revm::estimate_tx_compressed_size;
 use reth_chainspec::{ChainSpecProvider, EthChainSpec};
 use reth_node_api::NodePrimitives;
 use reth_optimism_evm::RethL1BlockInfo;
 use reth_optimism_forks::OpHardforks;
-use reth_primitives_traits::SealedBlock;
+use reth_primitives_traits::{BlockBody, SealedBlock};
 use reth_rpc_eth_api::{
     RpcConvert,
     helpers::LoadReceipt,
@@ -43,7 +49,7 @@ impl<Provider> OpReceiptConverter<Provider> {
 
 impl<Provider, N> ReceiptConverter<N> for OpReceiptConverter<Provider>
 where
-    N: NodePrimitives<SignedTx: OpTransaction, Receipt = OpReceipt>,
+    N: NodePrimitives<SignedTx: OpTransaction + Typed2718 + Encodable2718, Receipt = OpReceipt>,
     Provider:
         BlockReader<Block = N::Block> + ChainSpecProvider<ChainSpec: OpHardforks> + Debug + 'static,
 {
@@ -86,16 +92,34 @@ where
         };
 
         let mut receipts = Vec::with_capacity(inputs.len());
+        let sdm_payload: Option<SDMPayload> = block.body().transactions().iter().find_map(|tx| {
+            if tx.ty() != SDM_TX_TYPE_ID {
+                return None;
+            }
+
+            let encoded = tx.encoded_2718();
+            let mut encoded_slice = encoded.as_ref();
+            let sdm_tx = TxSdm::decode_2718(&mut encoded_slice).ok()?;
+            extract_sdm_payload_from_tx(&sdm_tx)
+        });
 
         for input in inputs {
             // We must clear this cache as different L2 transactions can have different
             // L1 costs. A potential improvement here is to only clear the cache if the
             // new transaction input has changed, since otherwise the L1 cost wouldn't.
             l1_block_info.clear_tx_l1_cost();
+            let op_gas_refund = sdm_payload
+                .as_ref()
+                .and_then(|payload: &SDMPayload| payload.gas_refund_for_idx(input.meta.index));
 
             receipts.push(
-                OpReceiptBuilder::new(&self.provider.chain_spec(), input, &mut l1_block_info)?
-                    .build(),
+                OpReceiptBuilder::new(
+                    &self.provider.chain_spec(),
+                    input,
+                    &mut l1_block_info,
+                    op_gas_refund,
+                )?
+                .build(),
             );
         }
 
@@ -120,6 +144,8 @@ pub struct OpReceiptFieldsBuilder {
     /* ---------------------------------------- Bedrock ---------------------------------------- */
     /// The base fee of the L1 origin block.
     pub l1_base_fee: Option<u128>,
+    /// SDM block-level warming refund for this transaction.
+    pub op_gas_refund: Option<u64>,
     /* --------------------------------------- Regolith ---------------------------------------- */
     /// Deposit nonce, if this is a deposit transaction.
     pub deposit_nonce: Option<u64>,
@@ -153,6 +179,7 @@ impl OpReceiptFieldsBuilder {
             l1_data_gas: None,
             l1_fee_scalar: None,
             l1_base_fee: None,
+            op_gas_refund: None,
             deposit_nonce: None,
             deposit_receipt_version: None,
             l1_base_fee_scalar: None,
@@ -229,6 +256,12 @@ impl OpReceiptFieldsBuilder {
         self
     }
 
+    /// Applies SDM block-level warming refund metadata.
+    pub const fn op_gas_refund(mut self, op_gas_refund: Option<u64>) -> Self {
+        self.op_gas_refund = op_gas_refund;
+        self
+    }
+
     /// Builds the [`OpTransactionReceiptFields`] object.
     pub const fn build(self) -> OpTransactionReceiptFields {
         let Self {
@@ -238,6 +271,7 @@ impl OpReceiptFieldsBuilder {
             l1_data_gas: l1_gas_used,
             l1_fee_scalar,
             l1_base_fee: l1_gas_price,
+            op_gas_refund,
             deposit_nonce,
             deposit_receipt_version,
             l1_base_fee_scalar,
@@ -261,6 +295,7 @@ impl OpReceiptFieldsBuilder {
                 operator_fee_constant,
                 da_footprint_gas_scalar,
             },
+            op_gas_refund,
             deposit_nonce,
             deposit_receipt_version,
         }
@@ -282,6 +317,7 @@ impl OpReceiptBuilder {
         chain_spec: &impl OpHardforks,
         input: ConvertReceiptInput<'_, N>,
         l1_block_info: &mut op_revm::L1BlockInfo,
+        op_gas_refund: Option<u64>,
     ) -> Result<Self, OpEthApiError>
     where
         N: NodePrimitives<SignedTx: OpTransaction, Receipt = OpReceipt>,
@@ -300,6 +336,7 @@ impl OpReceiptBuilder {
                 OpReceipt::Eip2930(receipt) => OpReceipt::Eip2930(map_logs(receipt)),
                 OpReceipt::Eip1559(receipt) => OpReceipt::Eip1559(map_logs(receipt)),
                 OpReceipt::Eip7702(receipt) => OpReceipt::Eip7702(map_logs(receipt)),
+                OpReceipt::Sdm(receipt) => OpReceipt::Sdm(map_logs(receipt)),
                 OpReceipt::Deposit(receipt) => OpReceipt::Deposit(receipt.map_inner(map_logs)),
             };
             mapped_receipt.into_with_bloom()
@@ -322,6 +359,7 @@ impl OpReceiptBuilder {
 
         let op_receipt_fields = OpReceiptFieldsBuilder::new(timestamp, block_number)
             .l1_block_info(chain_spec, tx_signed, l1_block_info)?
+            .op_gas_refund(op_gas_refund)
             .build();
 
         Ok(Self { core_receipt, op_receipt_fields })
@@ -332,9 +370,18 @@ impl OpReceiptBuilder {
     pub fn build(self) -> OpTransactionReceipt {
         let Self { core_receipt: inner, op_receipt_fields } = self;
 
-        let OpTransactionReceiptFields { l1_block_info, .. } = op_receipt_fields;
+        let OpTransactionReceiptFields {
+            l1_block_info,
+            op_gas_refund,
+            deposit_nonce: _,
+            deposit_receipt_version: _,
+        } = op_receipt_fields;
 
-        OpTransactionReceipt { inner, l1_block_info }
+        OpTransactionReceipt {
+            inner,
+            l1_block_info,
+            op_gas_refund,
+        }
     }
 }
 
@@ -388,6 +435,7 @@ mod test {
                 operator_fee_constant: None,
                 da_footprint_gas_scalar: None,
             },
+            op_gas_refund: None,
             deposit_nonce: None,
             deposit_receipt_version: None,
         };
@@ -661,6 +709,7 @@ mod test {
                 },
             },
             &mut l1_block_info,
+            None,
         )
         .unwrap();
 
@@ -715,6 +764,7 @@ mod test {
                 },
             },
             &mut l1_block_info,
+            None,
         )
         .unwrap();
 

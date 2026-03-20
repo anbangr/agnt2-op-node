@@ -172,7 +172,7 @@ where
     P: OpProofsStore + Clone + 'static,
     Attrs: OpAttributes<Transaction = TxTy<EvmConfig::Primitives>>,
     N: OpPayloadPrimitives,
-    EvmConfig: ConfigureEvm<
+    EvmConfig: reth_optimism_evm::ConfigureSdmEvm<
             Primitives = N,
             NextBlockEnvCtx: BuildNextEnv<Attrs, N::BlockHeader, Provider::ChainSpec>,
         > + 'static,

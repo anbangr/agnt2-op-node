@@ -11,6 +11,7 @@ use op_alloy_rpc_types_engine::OpExecutionData;
 use reth_chainspec::{ChainSpecProvider, EthChainSpec, Hardforks};
 use reth_engine_local::LocalPayloadAttributesBuilder;
 use reth_evm::ConfigureEvm;
+use reth_optimism_evm::ConfigureSdmEvm;
 use reth_network::{
     NetworkConfig, NetworkHandle, NetworkManager, NetworkPrimitives, PeersInfo,
     types::BasicNetworkPrimitives,
@@ -48,7 +49,7 @@ use reth_optimism_rpc::{
     eth::{OpEthApiBuilder, ext::OpEthExtApi},
     historical::{HistoricalRpc, HistoricalRpcClient},
     miner::{MinerApiExtServer, OpMinerExtApi},
-    witness::{DebugExecutionWitnessApiServer, OpDebugWitnessApi},
+    witness::{DebugExecutionWitnessApiServer, OpDebugSdmApiServer, OpDebugWitnessApi},
 };
 use reth_optimism_storage::OpStorage;
 use reth_optimism_txpool::{OpPooledTx, supervisor::SupervisorClient};
@@ -499,10 +500,10 @@ where
     N: FullNodeComponents<
             Types: NodeTypes<
                 ChainSpec: OpHardforks,
-                Primitives: OpPayloadPrimitives,
+                Primitives = OpPrimitives,
                 Payload: PayloadTypes<PayloadBuilderAttributes = Attrs>,
             >,
-            Evm: ConfigureEvm<
+            Evm: ConfigureSdmEvm<
                 NextBlockEnvCtx: BuildNextEnv<
                     Attrs,
                     HeaderTy<N::Types>,
@@ -567,6 +568,7 @@ where
             ctx.node.provider().clone(),
             Box::new(ctx.node.task_executor().clone()),
             builder,
+            ctx.node.evm_config().clone(),
         );
         let miner_ext = OpMinerExtApi::new(da_config, gas_limit_config);
 
@@ -588,7 +590,14 @@ where
                     container;
 
                 debug!(target: "reth::cli", "Installing debug payload witness rpc endpoint");
-                modules.merge_if_module_configured(RethRpcModule::Debug, debug_ext.into_rpc())?;
+                modules.merge_if_module_configured(
+                    RethRpcModule::Debug,
+                    DebugExecutionWitnessApiServer::into_rpc(debug_ext.clone()),
+                )?;
+                modules.merge_if_module_configured(
+                    RethRpcModule::Debug,
+                    OpDebugSdmApiServer::into_rpc(debug_ext),
+                )?;
 
                 // extend the miner namespace if configured in the regular http server
                 modules.add_or_replace_if_module_configured(
@@ -628,10 +637,10 @@ where
     N: FullNodeComponents<
             Types: NodeTypes<
                 ChainSpec: OpHardforks,
-                Primitives: OpPayloadPrimitives,
+                Primitives = OpPrimitives,
                 Payload: PayloadTypes<PayloadBuilderAttributes = Attrs>,
             >,
-            Evm: ConfigureEvm<
+            Evm: ConfigureSdmEvm<
                 NextBlockEnvCtx: BuildNextEnv<
                     Attrs,
                     HeaderTy<N::Types>,
@@ -1131,7 +1140,7 @@ where
                 >,
             >,
         >,
-    Evm: ConfigureEvm<
+    Evm: ConfigureSdmEvm<
             Primitives = PrimitivesTy<Node::Types>,
             NextBlockEnvCtx: BuildNextEnv<
                 Attrs,

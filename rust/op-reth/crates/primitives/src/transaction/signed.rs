@@ -14,13 +14,13 @@ use alloy_eips::{
     eip7702::SignedAuthorization,
 };
 use alloy_primitives::{Address, B256, Bytes, Signature, TxHash, TxKind, Uint, keccak256};
-use alloy_rlp::Header;
+use alloy_rlp::{Decodable, Header};
 use core::{
     hash::{Hash, Hasher},
     mem,
     ops::Deref,
 };
-use op_alloy_consensus::{OpPooledTransaction, OpTxEnvelope, OpTypedTransaction, TxDeposit};
+use op_alloy_consensus::{OpPooledTransaction, OpTxEnvelope, OpTypedTransaction, TxDeposit, TxSdm};
 #[cfg(any(test, feature = "reth-codec"))]
 use reth_primitives_traits::{
     InMemorySize, SignedTransaction,
@@ -63,6 +63,7 @@ impl OpTransactionSigned {
             OpTypedTransaction::Eip2930(tx) => &mut tx.input,
             OpTypedTransaction::Eip1559(tx) => &mut tx.input,
             OpTypedTransaction::Eip7702(tx) => &mut tx.input,
+            OpTypedTransaction::Sdm(_) => panic!("SDM transactions do not have mutable input"),
             OpTypedTransaction::Deposit(tx) => &mut tx.input,
         }
     }
@@ -110,6 +111,9 @@ impl SignerRecoverable for OpTransactionSigned {
         if let OpTypedTransaction::Deposit(TxDeposit { from, .. }) = self.transaction {
             return Ok(from);
         }
+        if matches!(self.transaction, OpTypedTransaction::Sdm(_)) {
+            return Ok(Address::ZERO);
+        }
 
         let Self { transaction, signature, .. } = self;
         let signature_hash = signature_hash(transaction);
@@ -122,6 +126,9 @@ impl SignerRecoverable for OpTransactionSigned {
         if let OpTypedTransaction::Deposit(TxDeposit { from, .. }) = &self.transaction {
             return Ok(*from);
         }
+        if matches!(self.transaction, OpTypedTransaction::Sdm(_)) {
+            return Ok(Address::ZERO);
+        }
 
         let Self { transaction, signature, .. } = self;
         let signature_hash = signature_hash(transaction);
@@ -132,6 +139,7 @@ impl SignerRecoverable for OpTransactionSigned {
         match &self.transaction {
             // Optimism's Deposit transaction does not have a signature. Directly return the
             // `from` address.
+            OpTypedTransaction::Sdm(_) => return Ok(Address::ZERO),
             OpTypedTransaction::Deposit(tx) => return Ok(tx.from),
             OpTypedTransaction::Legacy(tx) => tx.encode_for_signing(buf),
             OpTypedTransaction::Eip2930(tx) => tx.encode_for_signing(buf),
@@ -186,8 +194,16 @@ impl From<OpTxEnvelope> for OpTransactionSigned {
             OpTxEnvelope::Eip2930(tx) => tx.into(),
             OpTxEnvelope::Eip1559(tx) => tx.into(),
             OpTxEnvelope::Eip7702(tx) => tx.into(),
+            OpTxEnvelope::Sdm(tx) => tx.into(),
             OpTxEnvelope::Deposit(tx) => tx.into(),
         }
+    }
+}
+
+impl From<Sealed<TxSdm>> for OpTransactionSigned {
+    fn from(value: Sealed<TxSdm>) -> Self {
+        let (tx, hash) = value.into_parts();
+        Self::new(OpTypedTransaction::Sdm(tx), TxDeposit::signature(), hash)
     }
 }
 
@@ -205,6 +221,7 @@ impl From<OpTransactionSigned> for OpTxEnvelope {
             OpTypedTransaction::Legacy(tx) => Signed::new_unchecked(tx, signature, hash).into(),
             OpTypedTransaction::Eip2930(tx) => Signed::new_unchecked(tx, signature, hash).into(),
             OpTypedTransaction::Eip1559(tx) => Signed::new_unchecked(tx, signature, hash).into(),
+            OpTypedTransaction::Sdm(tx) => Sealed::new_unchecked(tx, hash).into(),
             OpTypedTransaction::Deposit(tx) => Sealed::new_unchecked(tx, hash).into(),
             OpTypedTransaction::Eip7702(tx) => Signed::new_unchecked(tx, signature, hash).into(),
         }
@@ -258,6 +275,7 @@ impl Encodable2718 for OpTransactionSigned {
             OpTypedTransaction::Eip7702(set_code_tx) => {
                 set_code_tx.eip2718_encoded_length(&self.signature)
             }
+            OpTypedTransaction::Sdm(sdm_tx) => sdm_tx.eip2718_encoded_length(),
             OpTypedTransaction::Deposit(deposit_tx) => deposit_tx.eip2718_encoded_length(),
         }
     }
@@ -277,6 +295,7 @@ impl Encodable2718 for OpTransactionSigned {
                 dynamic_fee_tx.eip2718_encode(signature, out)
             }
             OpTypedTransaction::Eip7702(set_code_tx) => set_code_tx.eip2718_encode(signature, out),
+            OpTypedTransaction::Sdm(sdm_tx) => sdm_tx.encode_2718(out),
             OpTypedTransaction::Deposit(deposit_tx) => deposit_tx.encode_2718(out),
         }
     }
@@ -304,6 +323,10 @@ impl Decodable2718 for OpTransactionSigned {
                 signed_tx.hash.get_or_init(|| hash);
                 Ok(signed_tx)
             }
+            op_alloy_consensus::OpTxType::Sdm => Ok(Self::new_unhashed(
+                OpTypedTransaction::Sdm(TxSdm::decode(buf)?),
+                TxDeposit::signature(),
+            )),
             op_alloy_consensus::OpTxType::Deposit => Ok(Self::new_unhashed(
                 OpTypedTransaction::Deposit(TxDeposit::rlp_decode(buf)?),
                 TxDeposit::signature(),
@@ -488,7 +511,11 @@ impl<'a> arbitrary::Arbitrary<'a> for OpTransactionSigned {
         )
         .unwrap();
 
-        let signature = if transaction.is_deposit() { TxDeposit::signature() } else { signature };
+        let signature = if transaction.is_deposit() || transaction.is_sdm() {
+            TxDeposit::signature()
+        } else {
+            signature
+        };
 
         Ok(Self::new_unhashed(transaction, signature))
     }
@@ -501,6 +528,7 @@ fn signature_hash(tx: &OpTypedTransaction) -> B256 {
         OpTypedTransaction::Eip2930(tx) => tx.signature_hash(),
         OpTypedTransaction::Eip1559(tx) => tx.signature_hash(),
         OpTypedTransaction::Eip7702(tx) => tx.signature_hash(),
+        OpTypedTransaction::Sdm(_) => B256::ZERO,
         OpTypedTransaction::Deposit(_) => B256::ZERO,
     }
 }

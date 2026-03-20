@@ -129,3 +129,18 @@ Op-reth requires `clang` / `libclang-dev` for reth-mdbx-sys bindgen. CI installs
 ## Skills
 
 - **Fix Rust Formatting** ([`.claude/skills/fix-rust-fmt/SKILL.md`](../../.claude/skills/fix-rust-fmt/SKILL.md)): Fixes `rust-fmt` CI failures by installing the pinned nightly toolchain and running `just fmt-fix`. Invoke with `/fix-rust-fmt`.
+
+## op-reth debug RPC wiring
+
+For standard `op-reth` nodes, custom `debug_` RPC extensions are mounted through:
+
+- `rust/op-reth/crates/rpc/src/witness.rs`
+- `rust/op-reth/crates/node/src/node.rs`
+
+Do not assume `rust/op-reth/crates/rpc/src/debug.rs` is the right integration point for normal
+node RPC changes. That file is used for the historical proofs / proofs-history extension path.
+
+If you need a new custom `debug_` method on a regular `op-reth` node:
+
+1. Add the RPC trait and handler in `rust/op-reth/crates/rpc/src/witness.rs`.
+2. Merge that RPC into the debug module in `rust/op-reth/crates/node/src/node.rs`.

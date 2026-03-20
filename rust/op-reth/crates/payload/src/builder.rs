@@ -5,7 +5,7 @@ use crate::{
 };
 use alloy_consensus::{BlockHeader, Transaction, Typed2718};
 use alloy_evm::Evm as AlloyEvm;
-use alloy_primitives::{B256, U256};
+use alloy_primitives::{Address, B256, U256};
 use alloy_rpc_types_debug::ExecutionWitness;
 use alloy_rpc_types_engine::PayloadId;
 use reth_basic_payload_builder::*;
@@ -19,6 +19,7 @@ use reth_evm::{
     op_revm::{L1BlockInfo, constants::L1_BLOCK_CONTRACT},
 };
 use reth_execution_types::BlockExecutionOutput;
+use reth_optimism_evm::{ConfigureSdmEvm, sdm::SdmExecutorExt};
 use reth_optimism_forks::OpHardforks;
 use reth_optimism_primitives::{L2_TO_L1_MESSAGE_PASSER_ADDRESS, transaction::OpTransaction};
 use reth_optimism_txpool::{
@@ -156,7 +157,7 @@ where
     Pool: TransactionPool<Transaction: OpPooledTx<Consensus = N::SignedTx>>,
     Client: StateProviderFactory + ChainSpecProvider<ChainSpec: OpHardforks>,
     N: OpPayloadPrimitives,
-    Evm: ConfigureEvm<
+    Evm: ConfigureSdmEvm<
             Primitives = N,
             NextBlockEnvCtx: BuildNextEnv<Attrs, N::BlockHeader, Client::ChainSpec>,
         >,
@@ -240,7 +241,7 @@ where
     N: OpPayloadPrimitives,
     Client: StateProviderFactory + ChainSpecProvider<ChainSpec: OpHardforks> + Clone,
     Pool: TransactionPool<Transaction: OpPooledTx<Consensus = N::SignedTx>>,
-    Evm: ConfigureEvm<
+    Evm: ConfigureSdmEvm<
             Primitives = N,
             NextBlockEnvCtx: BuildNextEnv<Attrs, N::BlockHeader, Client::ChainSpec>,
         >,
@@ -323,7 +324,7 @@ impl<Txs> OpBuilder<'_, Txs> {
         ctx: OpPayloadBuilderCtx<Evm, ChainSpec, Attrs>,
     ) -> Result<BuildOutcomeKind<OpBuiltPayload<N>>, PayloadBuilderError>
     where
-        Evm: ConfigureEvm<
+        Evm: ConfigureSdmEvm<
                 Primitives = N,
                 NextBlockEnvCtx: BuildNextEnv<Attrs, N::BlockHeader, ChainSpec>,
             >,
@@ -368,6 +369,27 @@ impl<Txs> OpBuilder<'_, Txs> {
             }
         }
 
+        // 4. SDM Block-Level Warming: build the synthetic SDM transaction from
+        //    accumulated warming entries and execute it through the builder.
+        let entries = builder.executor_mut().take_sdm_entries();
+        if !entries.is_empty() {
+            use alloy_consensus::Sealable;
+            let sdm_tx = op_alloy_consensus::sdm::build_sdm_tx(entries);
+            let sdm_sealed = sdm_tx.seal_slow();
+            let sdm_signed: N::SignedTx = sdm_sealed.into();
+            let sdm_recovered =
+                alloy_consensus::transaction::Recovered::new_unchecked(sdm_signed, Address::ZERO);
+
+            match builder.execute_transaction(sdm_recovered) {
+                Ok(_gas_used) => {
+                    debug!(target: "payload_builder", "SDM tx included in block");
+                }
+                Err(err) => {
+                    warn!(target: "payload_builder", %err, "SDM tx execution failed, skipping");
+                }
+            }
+        }
+
         let BlockBuilderOutcome { execution_result, hashed_state, trie_updates, block } =
             builder.finish(state_provider)?;
 
@@ -408,7 +430,7 @@ impl<Txs> OpBuilder<'_, Txs> {
         ctx: &OpPayloadBuilderCtx<Evm, ChainSpec, Attrs>,
     ) -> Result<ExecutionWitness, PayloadBuilderError>
     where
-        Evm: ConfigureEvm<
+        Evm: ConfigureSdmEvm<
                 Primitives = N,
                 NextBlockEnvCtx: BuildNextEnv<Attrs, N::BlockHeader, ChainSpec>,
             >,
@@ -557,7 +579,7 @@ pub struct OpPayloadBuilderCtx<
 
 impl<Evm, ChainSpec, Attrs> OpPayloadBuilderCtx<Evm, ChainSpec, Attrs>
 where
-    Evm: ConfigureEvm<
+    Evm: ConfigureSdmEvm<
             Primitives: OpPayloadPrimitives,
             NextBlockEnvCtx: BuildNextEnv<Attrs, HeaderTy<Evm::Primitives>, ChainSpec>,
         >,
@@ -599,12 +621,12 @@ where
     ) -> Result<
         impl BlockBuilder<
             Primitives = Evm::Primitives,
-            Executor: BlockExecutorFor<'a, Evm::BlockExecutorFactory, DB>,
+            Executor: BlockExecutorFor<'a, Evm::BlockExecutorFactory, DB> + SdmExecutorExt,
         > + 'a,
         PayloadBuilderError,
     > {
         self.evm_config
-            .builder_for_next_block(
+            .sdm_builder_for_next_block(
                 db,
                 self.parent(),
                 Evm::NextBlockEnvCtx::build_next_env(

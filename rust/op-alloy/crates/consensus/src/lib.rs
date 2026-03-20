@@ -37,6 +37,9 @@ pub use block::OpBlock;
 
 pub mod interop;
 
+pub mod sdm;
+pub use sdm::{SDMGasEntry, SDMPayload, SDM_TX_POSITION, SDM_TX_TYPE_ID, TxSdm};
+
 pub mod predeploys;
 pub use predeploys::L2_TO_L1_MESSAGE_PASSER_ADDRESS;
 
