@@ -160,3 +160,5 @@ fi
 )
 
 echo "Done."
+echo ""
+echo "open ${PNG_OUT}"

@@ -35,6 +35,7 @@ use revm::{
     context::{BlockEnv, TxEnv},
     context_interface::{
         JournalTr,
+        journaled_state::persistent_warm_cache::WarmingRefundEvent,
         result::{EVMError, ResultAndState},
     },
     handler::{PrecompileProvider, instructions::EthInstructions},
@@ -62,6 +63,7 @@ pub struct OpEvm<DB: Database, I, P = OpPrecompiles, Tx = OpTransaction<TxEnv>> 
     inner: op_revm::OpEvm<OpContext<DB>, I, EthInstructions<EthInterpreter, OpContext<DB>>, P>,
     inspect: bool,
     last_tx_warming_savings: u64,
+    last_tx_warming_events: Vec<WarmingRefundEvent>,
     _tx: PhantomData<Tx>,
 }
 
@@ -86,12 +88,28 @@ impl<DB: Database, I, P, Tx> OpEvm<DB, I, P, Tx> {
         evm: op_revm::OpEvm<OpContext<DB>, I, EthInstructions<EthInterpreter, OpContext<DB>>, P>,
         inspect: bool,
     ) -> Self {
-        Self { inner: evm, inspect, last_tx_warming_savings: 0, _tx: PhantomData }
+        Self {
+            inner: evm,
+            inspect,
+            last_tx_warming_savings: 0,
+            last_tx_warming_events: Vec::new(),
+            _tx: PhantomData,
+        }
     }
 
     /// Take the warming savings recorded for the most recently executed transaction.
     pub fn take_last_tx_warming_savings(&mut self) -> u64 {
         core::mem::take(&mut self.last_tx_warming_savings)
+    }
+
+    /// Take the exact warming refund attribution events recorded for the most recently executed transaction.
+    pub fn take_last_tx_warming_events(&mut self) -> Vec<WarmingRefundEvent> {
+        core::mem::take(&mut self.last_tx_warming_events)
+    }
+
+    /// Set the replay-local block tx index used for persistent warming provenance metadata.
+    pub fn set_persistent_warming_tx_index(&mut self, tx_index: u64) {
+        self.inner.0.ctx.journaled_state.set_persistent_warming_tx_index(tx_index);
     }
 }
 
@@ -140,6 +158,7 @@ where
         tx: Self::Tx,
     ) -> Result<ResultAndState<Self::HaltReason>, Self::Error> {
         self.last_tx_warming_savings = 0;
+        self.last_tx_warming_events.clear();
 
         let inner_tx: OpTransaction<TxEnv> = tx.into();
         let result = if self.inspect {
@@ -150,6 +169,8 @@ where
 
         self.last_tx_warming_savings =
             self.inner.0.ctx.journaled_state.take_last_tx_warming_savings();
+        self.last_tx_warming_events =
+            self.inner.0.ctx.journaled_state.take_last_tx_warming_events();
 
         let state = self.inner.finalize();
 
@@ -244,7 +265,13 @@ where
             ));
         inner.0.ctx.journaled_state.enable_persistent_warming();
 
-        OpEvm { inner, inspect: false, last_tx_warming_savings: 0, _tx: PhantomData }
+        OpEvm {
+            inner,
+            inspect: false,
+            last_tx_warming_savings: 0,
+            last_tx_warming_events: Vec::new(),
+            _tx: PhantomData,
+        }
     }
 
     fn create_evm_with_inspector<DB: Database, I: Inspector<Self::Context<DB>>>(
@@ -264,7 +291,13 @@ where
             ));
         inner.0.ctx.journaled_state.enable_persistent_warming();
 
-        OpEvm { inner, inspect: true, last_tx_warming_savings: 0, _tx: PhantomData }
+        OpEvm {
+            inner,
+            inspect: true,
+            last_tx_warming_savings: 0,
+            last_tx_warming_events: Vec::new(),
+            _tx: PhantomData,
+        }
     }
 }
 
@@ -277,7 +310,13 @@ mod tests {
     };
     use alloy_primitives::U256;
     use op_revm::precompiles::{bls12_381, bn254_pair};
-    use revm::{context::CfgEnv, database::EmptyDB, precompile::PrecompileError};
+    use revm::{
+        JournalEntry,
+        context::{CfgEnv, journal::JournalInner},
+        database::EmptyDB,
+        precompile::PrecompileError,
+        primitives::address,
+    };
 
     use super::*;
 
@@ -413,5 +452,37 @@ mod tests {
         });
 
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_persistent_warming_provenance_survives_finalize_without_changing_transaction_id() {
+        let mut journal = JournalInner::<JournalEntry>::new();
+        journal.enable_persistent_warming();
+        let seed_address = address!("5000000000000000000000000000000000000000");
+        let later_address = address!("6000000000000000000000000000000000000000");
+        let mut db = EmptyDB::new();
+
+        journal.set_persistent_warming_tx_index(0);
+        let first = journal.load_account_mut_optional(&mut db, seed_address, false).unwrap();
+        assert!(first.is_cold);
+        drop(first);
+        journal.commit_tx();
+        let _ = journal.finalize();
+        assert_eq!(journal.transaction_id, 0);
+
+        journal.set_persistent_warming_tx_index(1);
+        let second = journal.load_account_mut_optional(&mut db, later_address, false).unwrap();
+        assert!(second.is_cold);
+        drop(second);
+        journal.commit_tx();
+        let _ = journal.finalize();
+        assert_eq!(journal.transaction_id, 0);
+
+        journal.set_persistent_warming_tx_index(2);
+        let third = journal.load_account_mut_optional(&mut db, later_address, false).unwrap();
+        assert!(third.is_cold);
+        assert_eq!(journal.tx_warming_events.len(), 1);
+        assert_eq!(journal.tx_warming_events[0].claiming_tx_index, 2);
+        assert_eq!(journal.tx_warming_events[0].first_warmed_by_tx_index, 1);
     }
 }

@@ -8,7 +8,9 @@ use crate::{
     context::{SStoreResult, StateLoad},
     journaled_state::{
         JournalLoadErasedError, JournalLoadError, entry::JournalEntry,
-        persistent_warm_cache::PersistentWarmCache,
+        persistent_warm_cache::{
+            PersistentWarmCache, WarmAccessProvenance, WarmingRefundEvent, WarmingRefundKind,
+        },
     },
 };
 
@@ -137,8 +139,12 @@ pub struct JournaledAccount<'a, DB, ENTRY: JournalEntryTr = JournalEntry> {
     persistent_warm_cache: Option<&'a mut PersistentWarmCache>,
     /// Accumulated savings for the current transaction.
     warming_savings: &'a mut u64,
+    /// Exact refund attribution events for the current transaction.
+    warming_events: &'a mut Vec<WarmingRefundEvent>,
     /// Transaction ID.
     transaction_id: usize,
+    /// Replay-local block tx provenance used for refund attribution metadata.
+    warming_provenance: WarmAccessProvenance,
     /// Database used to load storage.
     db: &'a mut DB,
 }
@@ -154,7 +160,9 @@ impl<'a, DB: Database, ENTRY: JournalEntryTr> JournaledAccount<'a, DB, ENTRY> {
         access_list: &'a HashMap<Address, HashSet<StorageKey>>,
         persistent_warm_cache: Option<&'a mut PersistentWarmCache>,
         warming_savings: &'a mut u64,
+        warming_events: &'a mut Vec<WarmingRefundEvent>,
         transaction_id: usize,
+        warming_provenance: WarmAccessProvenance,
     ) -> Self {
         Self {
             address,
@@ -163,7 +171,9 @@ impl<'a, DB: Database, ENTRY: JournalEntryTr> JournaledAccount<'a, DB, ENTRY> {
             access_list,
             persistent_warm_cache,
             warming_savings,
+            warming_events,
             transaction_id,
+            warming_provenance,
             db,
         }
     }
@@ -189,13 +199,29 @@ impl<'a, DB: Database, ENTRY: JournalEntryTr> JournaledAccount<'a, DB, ENTRY> {
                 if slot.is_cold_transaction_id(self.transaction_id) {
                     let access_list_cold =
                         self.access_list.get(&self.address).and_then(|v| v.get(&key)).is_none();
-                    let persistent_warm = self
+                    let storage_provenance = self
                         .persistent_warm_cache
                         .as_deref()
-                        .is_some_and(|cache| cache.is_storage_warm(&self.address, &key));
+                        .and_then(|cache| cache.storage_provenance(&self.address, &key))
+                        .copied();
 
-                    if access_list_cold && persistent_warm {
-                        *self.warming_savings += if is_sstore { 2100 } else { 2000 };
+                    if access_list_cold {
+                        if let Some(provenance) = storage_provenance {
+                            let amount = if is_sstore { 2100 } else { 2000 };
+                            *self.warming_savings += amount;
+                            self.warming_events.push(WarmingRefundEvent {
+                                claiming_tx_index: self.warming_provenance.first_warmed_by_tx_index,
+                                kind: if is_sstore {
+                                    WarmingRefundKind::WarmSstore
+                                } else {
+                                    WarmingRefundKind::WarmSload
+                                },
+                                amount,
+                                address: self.address,
+                                slot: Some(key),
+                                first_warmed_by_tx_index: provenance.first_warmed_by_tx_index,
+                            });
+                        }
                     }
                     is_cold = access_list_cold;
 
@@ -209,17 +235,33 @@ impl<'a, DB: Database, ENTRY: JournalEntryTr> JournaledAccount<'a, DB, ENTRY> {
             Entry::Vacant(vac) => {
                 let access_list_cold =
                     self.access_list.get(&self.address).and_then(|v| v.get(&key)).is_none();
-                let persistent_warm = self
+                let storage_provenance = self
                     .persistent_warm_cache
                     .as_deref()
-                    .is_some_and(|cache| cache.is_storage_warm(&self.address, &key));
+                    .and_then(|cache| cache.storage_provenance(&self.address, &key))
+                    .copied();
                 let is_cold = access_list_cold;
 
                 if is_cold && skip_cold_load {
                     return Err(JournalLoadError::ColdLoadSkipped);
                 }
-                if access_list_cold && persistent_warm {
-                    *self.warming_savings += if is_sstore { 2100 } else { 2000 };
+                if access_list_cold {
+                    if let Some(provenance) = storage_provenance {
+                        let amount = if is_sstore { 2100 } else { 2000 };
+                        *self.warming_savings += amount;
+                        self.warming_events.push(WarmingRefundEvent {
+                            claiming_tx_index: self.warming_provenance.first_warmed_by_tx_index,
+                            kind: if is_sstore {
+                                WarmingRefundKind::WarmSstore
+                            } else {
+                                WarmingRefundKind::WarmSload
+                            },
+                            amount,
+                            address: self.address,
+                            slot: Some(key),
+                            first_warmed_by_tx_index: provenance.first_warmed_by_tx_index,
+                        });
+                    }
                 }
                 // if storage was cleared, we don't need to ping db.
                 let value = if is_newly_created {
@@ -239,7 +281,7 @@ impl<'a, DB: Database, ENTRY: JournalEntryTr> JournaledAccount<'a, DB, ENTRY> {
         }
 
         if let Some(cache) = self.persistent_warm_cache.as_deref_mut() {
-            cache.warm_storage(self.address, key);
+            cache.warm_storage_with_provenance(self.address, key, self.warming_provenance);
         }
 
         Ok(StateLoad::new(slot, is_cold))

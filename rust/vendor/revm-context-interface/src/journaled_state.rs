@@ -9,7 +9,10 @@ use crate::{
     ErasedError,
     context::{SStoreResult, SelfDestructResult},
     host::LoadError,
-    journaled_state::account::JournaledAccountTr,
+    journaled_state::{
+        account::JournaledAccountTr,
+        persistent_warm_cache::WarmingRefundEvent,
+    },
 };
 use core::ops::{Deref, DerefMut};
 use database_interface::Database;
@@ -312,6 +315,11 @@ pub trait JournalTr {
     /// Take the savings recorded for the most recently committed transaction.
     fn take_last_tx_warming_savings(&mut self) -> u64 {
         0
+    }
+
+    /// Take the exact warming refund attribution events recorded for the most recently committed transaction.
+    fn take_last_tx_warming_events(&mut self) -> Vec<WarmingRefundEvent> {
+        Vec::new()
     }
 
     /// Loads the account info from Journal state.

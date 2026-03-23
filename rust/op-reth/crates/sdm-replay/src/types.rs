@@ -1,5 +1,5 @@
 use alloy_eips::BlockNumberOrTag;
-use alloy_primitives::{B256, Bytes};
+use alloy_primitives::{Address, B256, Bytes};
 use serde::{Deserialize, Serialize};
 
 /// Single-block replay request, accepting either a block tag/number or a block hash.
@@ -59,6 +59,39 @@ impl Default for SdmReplayConfig {
     }
 }
 
+/// Exact refund categories emitted by the replay engine.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SdmReplayRefundKind {
+    /// Warm account rebate (+2500).
+    WarmAccount,
+    /// Warm storage read rebate (+2000).
+    WarmSload,
+    /// Warm storage write rebate (+2100).
+    WarmSstore,
+}
+
+/// Exact refund attribution event for one replayed transaction.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SdmReplayRefundEvent {
+    /// Replay-local transaction index that claimed the rebate.
+    pub claiming_replay_tx_index: u64,
+    /// Original transaction index in the source block that claimed the rebate.
+    pub claiming_tx_index: u64,
+    /// Refund kind.
+    pub kind: SdmReplayRefundKind,
+    /// Refund amount in gas.
+    pub amount: u64,
+    /// Account touched by the rebate.
+    pub address: Address,
+    /// Storage slot touched by the rebate, when applicable.
+    pub slot: Option<B256>,
+    /// Replay-local transaction index that first warmed the account or slot.
+    pub first_warmed_by_replay_tx_index: u64,
+    /// Original transaction index in the source block that first warmed the account or slot.
+    pub first_warmed_by_tx_index: u64,
+}
+
 /// Per-transaction replay row.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SdmReplayTx {
@@ -82,6 +115,8 @@ pub struct SdmReplayTx {
     pub op_gas_refund_receipt: Option<u64>,
     /// Gas used minus the replay refund.
     pub effective_gas: u64,
+    /// Exact refund attribution events that sum to `op_gas_refund_replay`.
+    pub refund_breakdown: Vec<SdmReplayRefundEvent>,
     /// Whether any mismatch affected this row.
     pub mismatch: bool,
 }

@@ -114,6 +114,9 @@ func ReplayRange(ctx context.Context, src Source, cfg Config) (*RangeResult, err
 		totalRefundRatio += blockResult.Block.AvgRefundRatio * float64(blockResult.Block.TxCountUser)
 	}
 
+	if result.Summary.TotalGasUsed > 0 {
+		result.Summary.TotalRefundRatio = float64(result.Summary.ReplayRefundTotal) / float64(result.Summary.TotalGasUsed)
+	}
 	if result.Summary.TxCountUser > 0 {
 		result.Summary.AvgRefundRatio = totalRefundRatio / float64(result.Summary.TxCountUser)
 	}
@@ -160,6 +163,9 @@ func replayBlock(ctx context.Context, src Source, blockNum uint64, cfg Config) (
 		PayloadRefundTotal:     replay.Summary.PayloadRefundTotal,
 		MismatchCount:          replay.Summary.MismatchCount,
 		ReplayMode:             replay.Summary.ReplayMode,
+	}
+	if blockRecord.BlockGasUsed > 0 {
+		blockRecord.BlockRefundRatio = float64(blockRecord.ReplayRefundTotal) / float64(blockRecord.BlockGasUsed)
 	}
 
 	mismatches := make([]MismatchRecord, 0, len(replay.Mismatches))

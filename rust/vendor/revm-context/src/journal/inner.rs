@@ -7,7 +7,9 @@ use context_interface::{
         AccountLoad, JournalCheckpoint, JournalLoadError, TransferError,
         account::{JournaledAccount, JournaledAccountTr},
         entry::{JournalEntryTr, SelfdestructionRevertStatus},
-        persistent_warm_cache::PersistentWarmCache,
+        persistent_warm_cache::{
+            PersistentWarmCache, WarmAccessProvenance, WarmingRefundEvent, WarmingRefundKind,
+        },
     },
 };
 use core::mem;
@@ -61,10 +63,16 @@ pub struct JournalInner<ENTRY> {
     pub warm_addresses: WarmAddresses,
     /// Cross-transaction warming cache that persists for the EVM instance lifetime.
     pub persistent_warm_cache: Option<PersistentWarmCache>,
+    /// Replay-local block tx index used for warming provenance metadata.
+    pub persistent_warming_provenance_tx_index: Option<u64>,
     /// Savings accumulated during the current transaction.
     pub tx_warming_savings: u64,
+    /// Exact warming refund attribution events for the current transaction.
+    pub tx_warming_events: Vec<WarmingRefundEvent>,
     /// Savings accumulated during the most recently committed transaction.
     pub last_tx_warming_savings: u64,
+    /// Exact warming refund attribution events for the most recently committed transaction.
+    pub last_tx_warming_events: Vec<WarmingRefundEvent>,
 }
 
 impl<ENTRY: JournalEntryTr> Default for JournalInner<ENTRY> {
@@ -89,8 +97,11 @@ impl<ENTRY: JournalEntryTr> JournalInner<ENTRY> {
             spec: SpecId::default(),
             warm_addresses: WarmAddresses::new(),
             persistent_warm_cache: None,
+            persistent_warming_provenance_tx_index: None,
             tx_warming_savings: 0,
+            tx_warming_events: Vec::new(),
             last_tx_warming_savings: 0,
+            last_tx_warming_events: Vec::new(),
         }
     }
 
@@ -98,22 +109,48 @@ impl<ENTRY: JournalEntryTr> JournalInner<ENTRY> {
     #[inline]
     pub fn enable_persistent_warming(&mut self) {
         self.persistent_warm_cache = Some(PersistentWarmCache::new());
+        self.persistent_warming_provenance_tx_index = None;
         self.tx_warming_savings = 0;
+        self.tx_warming_events.clear();
         self.last_tx_warming_savings = 0;
+        self.last_tx_warming_events.clear();
     }
 
     /// Disable persistent warming.
     #[inline]
     pub fn disable_persistent_warming(&mut self) {
         self.persistent_warm_cache = None;
+        self.persistent_warming_provenance_tx_index = None;
         self.tx_warming_savings = 0;
+        self.tx_warming_events.clear();
         self.last_tx_warming_savings = 0;
+        self.last_tx_warming_events.clear();
     }
 
     /// Returns true if persistent warming is enabled.
     #[inline]
     pub fn is_persistent_warming_enabled(&self) -> bool {
         self.persistent_warm_cache.is_some()
+    }
+
+    /// Sets the replay-local block tx index used for persistent warming provenance.
+    #[inline]
+    pub fn set_persistent_warming_tx_index(&mut self, tx_index: u64) {
+        self.persistent_warming_provenance_tx_index = Some(tx_index);
+    }
+
+    /// Clears the current persistent warming provenance tx index.
+    #[inline]
+    pub fn clear_persistent_warming_tx_index(&mut self) {
+        self.persistent_warming_provenance_tx_index = None;
+    }
+
+    /// Returns the current persistent warming provenance.
+    #[inline]
+    pub fn current_persistent_warming_provenance(&self) -> WarmAccessProvenance {
+        self.persistent_warming_provenance_tx_index
+            .map(WarmAccessProvenance::from_tx_index)
+            .unwrap_or_else(WarmAccessProvenance::unknown)
     }
 
     /// Returns the current transaction's warming savings without resetting them.
@@ -126,6 +163,12 @@ impl<ENTRY: JournalEntryTr> JournalInner<ENTRY> {
     #[inline]
     pub fn take_last_tx_warming_savings(&mut self) -> u64 {
         mem::take(&mut self.last_tx_warming_savings)
+    }
+
+    /// Take the exact warming refund attribution events for the most recently committed transaction.
+    #[inline]
+    pub fn take_last_tx_warming_events(&mut self) -> Vec<WarmingRefundEvent> {
+        mem::take(&mut self.last_tx_warming_events)
     }
 
     /// Returns the logs
@@ -154,8 +197,11 @@ impl<ENTRY: JournalEntryTr> JournalInner<ENTRY> {
             spec,
             warm_addresses,
             persistent_warm_cache: _,
+            persistent_warming_provenance_tx_index,
             tx_warming_savings,
+            tx_warming_events,
             last_tx_warming_savings,
+            last_tx_warming_events,
         } = self;
         // Spec, precompiles, BAL and state are not changed. It is always set again execution.
         let _ = spec;
@@ -170,7 +216,9 @@ impl<ENTRY: JournalEntryTr> JournalInner<ENTRY> {
         warm_addresses.clear_coinbase_and_access_list();
         // increment transaction id.
         *transaction_id += 1;
+        *persistent_warming_provenance_tx_index = None;
         *last_tx_warming_savings = mem::take(tx_warming_savings);
+        *last_tx_warming_events = mem::take(tx_warming_events);
 
         logs.clear();
     }
@@ -188,8 +236,11 @@ impl<ENTRY: JournalEntryTr> JournalInner<ENTRY> {
             spec,
             warm_addresses,
             persistent_warm_cache: _,
+            persistent_warming_provenance_tx_index,
             tx_warming_savings,
+            tx_warming_events,
             last_tx_warming_savings,
+            last_tx_warming_events,
         } = self;
         let is_spurious_dragon_enabled = spec.is_enabled_in(SPURIOUS_DRAGON);
         // iterate over all journals entries and revert our global state
@@ -200,8 +251,11 @@ impl<ENTRY: JournalEntryTr> JournalInner<ENTRY> {
         *depth = 0;
         logs.clear();
         *transaction_id += 1;
+        *persistent_warming_provenance_tx_index = None;
         *tx_warming_savings = 0;
+        tx_warming_events.clear();
         *last_tx_warming_savings = 0;
+        last_tx_warming_events.clear();
 
         // Clear coinbase address warming for next tx
         warm_addresses.clear_coinbase_and_access_list();
@@ -225,15 +279,21 @@ impl<ENTRY: JournalEntryTr> JournalInner<ENTRY> {
             spec,
             warm_addresses,
             persistent_warm_cache: _,
+            persistent_warming_provenance_tx_index,
             tx_warming_savings,
+            tx_warming_events,
             last_tx_warming_savings,
+            last_tx_warming_events,
         } = self;
         // Spec is not changed. And it is always set again in execution.
         let _ = spec;
         // Clear coinbase address warming for next tx
         warm_addresses.clear_coinbase_and_access_list();
+        *persistent_warming_provenance_tx_index = None;
         *tx_warming_savings = 0;
+        tx_warming_events.clear();
         *last_tx_warming_savings = 0;
+        last_tx_warming_events.clear();
 
         let state = mem::take(state);
         logs.clear();
@@ -750,6 +810,7 @@ impl<ENTRY: JournalEntryTr> JournalInner<ENTRY> {
     where
         'db: 'a,
     {
+        let warming_provenance = self.current_persistent_warming_provenance();
         let account = self.state.get_mut(&address)?;
         Some(JournaledAccount::new(
             address,
@@ -759,7 +820,9 @@ impl<ENTRY: JournalEntryTr> JournalInner<ENTRY> {
             self.warm_addresses.access_list(),
             self.persistent_warm_cache.as_mut(),
             &mut self.tx_warming_savings,
+            &mut self.tx_warming_events,
             self.transaction_id,
+            warming_provenance,
         ))
     }
 
@@ -774,6 +837,8 @@ impl<ENTRY: JournalEntryTr> JournalInner<ENTRY> {
     where
         'db: 'a,
     {
+        let warming_provenance = self.current_persistent_warming_provenance();
+        let warming_tx_index = warming_provenance.first_warmed_by_tx_index;
         let (account, is_cold) = match self.state.entry(address) {
             Entry::Occupied(entry) => {
                 let account = entry.into_mut();
@@ -782,13 +847,24 @@ impl<ENTRY: JournalEntryTr> JournalInner<ENTRY> {
 
                 if unlikely(is_cold) {
                     let tx_access_cold = self.warm_addresses.is_cold(&address);
-                    let persistent_warm = self
+                    let account_provenance = self
                         .persistent_warm_cache
                         .as_ref()
-                        .is_some_and(|cache| cache.is_address_warm(&address));
+                        .and_then(|cache| cache.address_provenance(&address))
+                        .copied();
 
-                    if tx_access_cold && persistent_warm && record_account_rebate {
-                        self.tx_warming_savings += 2500;
+                    if tx_access_cold && record_account_rebate {
+                        if let Some(provenance) = account_provenance {
+                            self.tx_warming_savings += 2500;
+                            self.tx_warming_events.push(WarmingRefundEvent {
+                                claiming_tx_index: warming_tx_index,
+                                kind: WarmingRefundKind::WarmAccount,
+                                amount: 2500,
+                                address,
+                                slot: None,
+                                first_warmed_by_tx_index: provenance.first_warmed_by_tx_index,
+                            });
+                        }
                     }
                     is_cold = self.warm_addresses.check_is_cold(&address, skip_cold_load)?;
 
@@ -803,19 +879,30 @@ impl<ENTRY: JournalEntryTr> JournalInner<ENTRY> {
                     self.journal.push(ENTRY::account_warmed(address));
 
                     if let Some(cache) = &mut self.persistent_warm_cache {
-                        cache.warm_account(address);
+                        cache.warm_account_with_provenance(address, warming_provenance);
                     }
                 }
                 (account, is_cold)
             }
             Entry::Vacant(vac) => {
                 let tx_access_cold = self.warm_addresses.is_cold(&address);
-                let persistent_warm = self
+                let account_provenance = self
                     .persistent_warm_cache
                     .as_ref()
-                    .is_some_and(|cache| cache.is_address_warm(&address));
-                if tx_access_cold && persistent_warm && record_account_rebate {
-                    self.tx_warming_savings += 2500;
+                    .and_then(|cache| cache.address_provenance(&address))
+                    .copied();
+                if tx_access_cold && record_account_rebate {
+                    if let Some(provenance) = account_provenance {
+                        self.tx_warming_savings += 2500;
+                        self.tx_warming_events.push(WarmingRefundEvent {
+                            claiming_tx_index: warming_tx_index,
+                            kind: WarmingRefundKind::WarmAccount,
+                            amount: 2500,
+                            address,
+                            slot: None,
+                            first_warmed_by_tx_index: provenance.first_warmed_by_tx_index,
+                        });
+                    }
                 }
                 let is_cold = self.warm_addresses.check_is_cold(&address, skip_cold_load)?;
 
@@ -832,7 +919,7 @@ impl<ENTRY: JournalEntryTr> JournalInner<ENTRY> {
                 }
 
                 if let Some(cache) = &mut self.persistent_warm_cache {
-                    cache.warm_account(address);
+                    cache.warm_account_with_provenance(address, warming_provenance);
                 }
 
                 (vac.insert(account), is_cold)
@@ -848,7 +935,9 @@ impl<ENTRY: JournalEntryTr> JournalInner<ENTRY> {
                 self.warm_addresses.access_list(),
                 self.persistent_warm_cache.as_mut(),
                 &mut self.tx_warming_savings,
+                &mut self.tx_warming_events,
                 self.transaction_id,
+                warming_provenance,
             ),
             is_cold,
         ))
@@ -1051,6 +1140,10 @@ mod tests {
         let second = journal.load_account_mut_optional(&mut db, test_address, false).unwrap();
         assert!(second.is_cold);
         assert_eq!(journal.tx_warming_savings, 2500);
+        assert_eq!(journal.tx_warming_events.len(), 1);
+        assert_eq!(journal.tx_warming_events[0].kind, WarmingRefundKind::WarmAccount);
+        assert_eq!(journal.tx_warming_events[0].amount, 2500);
+        assert_eq!(journal.tx_warming_events[0].first_warmed_by_tx_index, 0);
     }
 
     #[test]
@@ -1079,6 +1172,10 @@ mod tests {
             journal.sload_assume_account_present(&mut db, test_address, test_key, false).unwrap();
         assert!(second.is_cold);
         assert_eq!(journal.tx_warming_savings, 2000);
+        assert_eq!(journal.tx_warming_events.len(), 1);
+        assert_eq!(journal.tx_warming_events[0].kind, WarmingRefundKind::WarmSload);
+        assert_eq!(journal.tx_warming_events[0].amount, 2000);
+        assert_eq!(journal.tx_warming_events[0].first_warmed_by_tx_index, 0);
     }
 
     #[test]
@@ -1109,5 +1206,9 @@ mod tests {
             .unwrap();
         assert!(second.is_cold);
         assert_eq!(journal.tx_warming_savings, 2100);
+        assert_eq!(journal.tx_warming_events.len(), 1);
+        assert_eq!(journal.tx_warming_events[0].kind, WarmingRefundKind::WarmSstore);
+        assert_eq!(journal.tx_warming_events[0].amount, 2100);
+        assert_eq!(journal.tx_warming_events[0].first_warmed_by_tx_index, 0);
     }
 }

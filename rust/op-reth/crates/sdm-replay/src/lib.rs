@@ -11,5 +11,5 @@ pub use replay::{SdmReplayError, replay_block, strip_sdm_tx_for_replay};
 pub use types::{
     ReplaySdmBlockOptions, ReplaySdmBlockRequest, SdmMode, SdmReplayBlock, SdmReplayConfig,
     SdmReplayMismatch, SdmReplayMismatchKind, SdmReplayPayload, SdmReplayPayloadEntry,
-    SdmReplayRunConfig, SdmReplaySummary, SdmReplayTx,
+    SdmReplayRefundEvent, SdmReplayRefundKind, SdmReplayRunConfig, SdmReplaySummary, SdmReplayTx,
 };

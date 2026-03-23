@@ -33,6 +33,7 @@ use revm::{
         Block,
         result::{ExecutionResult, Output, ResultAndState, SuccessReason},
     },
+    context_interface::journaled_state::persistent_warm_cache::WarmingRefundEvent,
     database::{DatabaseCommitExt, State},
 };
 
@@ -76,6 +77,8 @@ pub struct OpTxResult<H, T> {
     pub sender: Address,
     /// Savings realized from block-level warming for this transaction.
     pub warming_savings: u64,
+    /// Exact warming refund attribution events for this transaction.
+    pub warming_events: Vec<WarmingRefundEvent>,
 }
 
 impl<H, T> TxResult for OpTxResult<H, T> {
@@ -118,6 +121,12 @@ pub struct OpBlockExecutor<Evm, R: OpReceiptBuilder, Spec> {
     pub sdm_payload: Option<SDMPayload>,
     /// Extractor for the most recent transaction's warming savings.
     pub take_warming_savings: fn(&mut Evm) -> u64,
+    /// Extractor for the most recent transaction's exact warming refund attribution events.
+    pub take_warming_events: fn(&mut Evm) -> Vec<WarmingRefundEvent>,
+    /// Setter for the replay-local block tx index used in warming provenance metadata.
+    pub set_warming_tx_index: fn(&mut Evm, u64),
+    /// Per-transaction exact warming refund attribution events aligned with receipts.
+    pub warming_events_by_tx: Vec<Vec<WarmingRefundEvent>>,
 }
 
 impl<E, R, Spec> OpBlockExecutor<E, R, Spec>
@@ -142,12 +151,30 @@ where
             sdm_entries: Vec::new(),
             sdm_payload: None,
             take_warming_savings: |_| 0,
+            take_warming_events: |_| Vec::new(),
+            set_warming_tx_index: |_, _| {},
+            warming_events_by_tx: Vec::new(),
         }
     }
 
     /// Configure how the executor should read the most recent transaction's warming savings.
     pub fn with_warming_savings(mut self, take_warming_savings: fn(&mut E) -> u64) -> Self {
         self.take_warming_savings = take_warming_savings;
+        self
+    }
+
+    /// Configure how the executor should read the most recent transaction's exact warming refund attribution events.
+    pub fn with_warming_events(
+        mut self,
+        take_warming_events: fn(&mut E) -> Vec<WarmingRefundEvent>,
+    ) -> Self {
+        self.take_warming_events = take_warming_events;
+        self
+    }
+
+    /// Configure how the executor should stamp replay-local tx indexes into warming provenance metadata.
+    pub fn with_warming_tx_index(mut self, set_warming_tx_index: fn(&mut E, u64)) -> Self {
+        self.set_warming_tx_index = set_warming_tx_index;
         self
     }
 
@@ -164,6 +191,11 @@ where
     /// Returns the entries and clears the internal state.
     pub fn take_sdm_entries(&mut self) -> Vec<SDMGasEntry> {
         core::mem::take(&mut self.sdm_entries)
+    }
+
+    /// Take the exact per-transaction warming refund attribution events aligned with receipts.
+    pub fn take_warming_events_by_tx(&mut self) -> Vec<Vec<WarmingRefundEvent>> {
+        core::mem::take(&mut self.warming_events_by_tx)
     }
 }
 
@@ -325,8 +357,12 @@ where
                 is_sdm: true,
                 sender: *tx.signer(),
                 warming_savings: 0,
+                warming_events: Vec::new(),
             });
         }
+
+        let replay_tx_index = self.receipts.len() as u64;
+        (self.set_warming_tx_index)(&mut self.evm, replay_tx_index);
 
         // Execute transaction and return the result
         let result = self.evm.transact(tx_env).map_err(|err| {
@@ -334,6 +370,7 @@ where
             BlockExecutionError::evm(err, hash)
         })?;
         let warming_savings = (self.take_warming_savings)(&mut self.evm);
+        let warming_events = (self.take_warming_events)(&mut self.evm);
 
         Ok(OpTxResult {
             inner: EthTxResult {
@@ -345,6 +382,7 @@ where
             is_sdm: false,
             sender: *tx.signer(),
             warming_savings,
+            warming_events,
         })
     }
 
@@ -355,6 +393,7 @@ where
             is_sdm,
             sender,
             warming_savings,
+            warming_events,
         } = output;
 
         if !is_deposit && !is_sdm && warming_savings > 0 {
@@ -362,6 +401,7 @@ where
                 SDMGasEntry { index: self.receipts.len() as u64, gas_refund: warming_savings };
             self.sdm_entries.push(entry);
         }
+        self.warming_events_by_tx.push(warming_events);
 
         // Fetch the depositor account from the database for the deposit nonce.
         // Note that this *only* needs to be done post-regolith hardfork, as deposit nonces

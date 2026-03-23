@@ -167,6 +167,10 @@ def mean(values):
     return sum(values) / len(values) if values else 0.0
 
 
+def ratio(numerator, denominator):
+    return numerator / denominator if denominator else 0.0
+
+
 def choose_replay_bucket_size(block_count):
     if block_count > 1000:
         return 100
@@ -195,15 +199,20 @@ def aggregate_replay(blocks, tx_ratios, bucket_size=None):
         end_block = chunk[-1]["block_num"]
         label = str(start_block) if start_block == end_block else f"{start_block}-{end_block}"
 
+        block_gas_used = sum(rec.get("block_gas_used", 0) for rec in chunk)
+        block_effective_gas = sum(rec.get("block_effective_gas", 0) for rec in chunk)
+        replay_refund_total = sum(rec.get("replay_refund_total", 0) for rec in chunk)
+
         grouped_blocks.append(
             {
                 "label": label,
                 "start_block": start_block,
                 "end_block": end_block,
                 "block_count": len(chunk),
-                "block_gas_used": mean([rec.get("block_gas_used", 0) for rec in chunk]),
-                "block_effective_gas": mean([rec.get("block_effective_gas", 0) for rec in chunk]),
-                "replay_refund_total": mean([rec.get("replay_refund_total", 0) for rec in chunk]),
+                "block_gas_used": block_gas_used,
+                "block_effective_gas": block_effective_gas,
+                "replay_refund_total": replay_refund_total,
+                "block_refund_ratio": ratio(replay_refund_total, block_gas_used),
                 "avg_refund_ratio": mean([rec.get("avg_refund_ratio", 0.0) for rec in chunk]),
                 "tx_count_user": sum(rec.get("tx_count_user", 0) for rec in chunk),
                 "mismatch_count": sum(rec.get("mismatch_count", 0) for rec in chunk),
@@ -241,6 +250,82 @@ def format_block_axis(ax, positions, labels, bucket_size):
     ax.set_xticklabels([labels[idx] for idx in visible_indices], rotation=20)
 
 
+def block_refund_ratio_value(rec):
+    return rec.get("block_refund_ratio", ratio(rec.get("replay_refund_total", 0), rec.get("block_gas_used", 0)))
+
+
+def refund_ranking_rows(blocks, reverse=False, limit=10):
+    eligible_blocks = [rec for rec in blocks if rec.get("block_gas_used", 0) > 0]
+    ordered = sorted(
+        eligible_blocks,
+        key=lambda rec: (
+            block_refund_ratio_value(rec),
+            rec.get("replay_refund_total", 0),
+            rec.get("block_num", 0),
+        ),
+        reverse=reverse,
+    )
+    rows = []
+    for rec in ordered[:limit]:
+        rows.append(
+            [
+                str(rec.get("block_num", "-")),
+                f"{block_refund_ratio_value(rec):.2%}",
+                f"{rec.get('replay_refund_total', 0):,}",
+                f"{rec.get('block_gas_used', 0):,}",
+                f"{rec.get('block_effective_gas', 0):,}",
+            ]
+        )
+    return rows
+
+
+def add_refund_rankings_table(ax, blocks):
+    ax.axis("off")
+    ax.set_title(
+        "Per-Block Refund Ratio Rankings (exact replay_refund_total / block_gas_used)",
+        loc="left",
+        fontsize=11,
+        fontweight="bold",
+        pad=10,
+    )
+
+    columns = ["Block", "Refund %", "Refund Gas", "Gas Used", "Effective Gas"]
+    top_rows = refund_ranking_rows(blocks, reverse=True)
+    bottom_rows = refund_ranking_rows(blocks, reverse=False)
+
+    if not top_rows and not bottom_rows:
+        ax.text(0.5, 0.5, "No non-empty block records available for ranking", ha="center", va="center")
+        return
+
+    ax.text(0.245, 0.93, "Top 10 refund % blocks", ha="center", va="center", fontsize=10, fontweight="bold")
+    ax.text(0.755, 0.93, "Bottom 10 refund % blocks", ha="center", va="center", fontsize=10, fontweight="bold")
+
+    top_table = ax.table(
+        cellText=top_rows or [["-", "-", "-", "-", "-"]],
+        colLabels=columns,
+        cellLoc="center",
+        colLoc="center",
+        bbox=[0.02, 0.02, 0.46, 0.85],
+    )
+    bottom_table = ax.table(
+        cellText=bottom_rows or [["-", "-", "-", "-", "-"]],
+        colLabels=columns,
+        cellLoc="center",
+        colLoc="center",
+        bbox=[0.52, 0.02, 0.46, 0.85],
+    )
+
+    for table in (top_table, bottom_table):
+        table.auto_set_font_size(False)
+        table.set_fontsize(8)
+        table.scale(1, 1.15)
+        for (row, col), cell in table.get_celld().items():
+            cell.set_linewidth(0.4)
+            if row == 0:
+                cell.set_facecolor("#EAEAF2")
+                cell.set_text_props(weight="bold")
+
+
 def plot_replay(run_config, summary, blocks, tx_ratios, output_path):
     if not blocks:
         print("No block records found.", file=sys.stderr)
@@ -259,13 +344,20 @@ def plot_replay(run_config, summary, blocks, tx_ratios, output_path):
     gas_used = [rec["block_gas_used"] for rec in grouped_blocks]
     effective_gas = [rec["block_effective_gas"] for rec in grouped_blocks]
     refund_total = [rec["replay_refund_total"] for rec in grouped_blocks]
-    avg_refund_ratio = [rec["avg_refund_ratio"] for rec in grouped_blocks]
+    block_refund_ratio = [rec["block_refund_ratio"] for rec in grouped_blocks]
     user_txs = [rec["tx_count_user"] for rec in grouped_blocks]
     payload_entries = [rec["sdm_payload_entry_count"] for rec in grouped_blocks]
     tx_labels = [rec["label"] for rec in tx_grouped_blocks]
     tx_x_values = list(range(len(tx_grouped_blocks)))
 
-    fig, axes = plt.subplots(2, 2, figsize=(18, 10))
+    fig = plt.figure(figsize=(18, 14))
+    gs = fig.add_gridspec(3, 2, height_ratios=[1, 1, 1.2])
+    ax_gas = fig.add_subplot(gs[0, 0])
+    ax_ratio = fig.add_subplot(gs[0, 1])
+    ax_tx = fig.add_subplot(gs[1, 0])
+    ax_counts = fig.add_subplot(gs[1, 1])
+    ax_table = fig.add_subplot(gs[2, :])
+
     fig.suptitle("SDM Replay Range", fontsize=14, fontweight="bold")
 
     subtitle = []
@@ -277,6 +369,17 @@ def plot_replay(run_config, summary, blocks, tx_ratios, output_path):
         subtitle.append(f"Chain ID: {run_config.get('chain_id')}")
     if summary:
         subtitle.append(f"Processed: {summary.get('blocks_processed', len(blocks))}")
+        total_gas_used = summary.get("total_gas_used", 0)
+        total_refund = summary.get("replay_refund_total", 0)
+        total_refund_ratio = summary.get("total_refund_ratio", ratio(total_refund, total_gas_used))
+    else:
+        total_gas_used = sum(rec.get("block_gas_used", 0) for rec in blocks)
+        total_refund = sum(rec.get("replay_refund_total", 0) for rec in blocks)
+        total_refund_ratio = ratio(total_refund, total_gas_used)
+    subtitle.append(
+        f"Overall refund/gas: {total_refund_ratio:.2%} ({total_refund:,.0f} / {total_gas_used:,.0f})"
+    )
+    subtitle.append("Effective gas = block gas used - replay refund")
     if bucket_size > 1:
         subtitle.append(f"Main plots grouped: {bucket_size} blocks per bucket")
     if tx_bucket_size > 1:
@@ -286,41 +389,53 @@ def plot_replay(run_config, summary, blocks, tx_ratios, output_path):
     range_suffix = "by Block" if bucket_size == 1 else "by Range"
     tx_range_suffix = "by Block" if tx_bucket_size == 1 else f"by {tx_bucket_size}-Block Range"
 
-    ax = axes[0][0]
-    ax.plot(x_values, gas_used, marker="o", color="#4C72B0", label="Mean Block Gas Used")
-    ax.plot(x_values, effective_gas, marker="o", color="#55A868", label="Mean Effective Gas")
-    ax.plot(x_values, refund_total, marker="o", color="#C44E52", label="Mean Replay Refund")
-    ax.set_title(f"Gas Used, Effective Gas, and Replay Refund {range_suffix}")
-    ax.set_ylabel("Gas")
-    ax.legend()
-    ax.yaxis.set_major_formatter(ticker.FuncFormatter(lambda v, _: f"{v:,.0f}"))
-    format_block_axis(ax, x_values, labels, bucket_size)
+    ax_gas.bar(
+        x_values,
+        effective_gas,
+        color="#55A868",
+        edgecolor="black",
+        linewidth=0.5,
+        label="Effective Gas",
+    )
+    ax_gas.bar(
+        x_values,
+        refund_total,
+        bottom=effective_gas,
+        color="#C44E52",
+        edgecolor="black",
+        linewidth=0.5,
+        label="Replay Refund",
+    )
+    ax_gas.plot(x_values, gas_used, color="#4C72B0", marker="o", linewidth=1.5, label="Block Gas Used")
+    ax_gas.set_title(f"Block Gas Composition {range_suffix}")
+    ax_gas.set_ylabel("Gas")
+    ax_gas.yaxis.set_major_formatter(ticker.FuncFormatter(lambda v, _: f"{v:,.0f}"))
+    format_block_axis(ax_gas, x_values, labels, bucket_size)
+    ax_gas.legend(loc="upper right")
 
-    ax = axes[0][1]
-    bars = ax.bar(x_values, avg_refund_ratio, color="#8172B2", edgecolor="black", linewidth=0.5)
-    ax.set_title(f"Average Refund Ratio {range_suffix}")
-    ax.set_ylabel("Refund Ratio")
-    ax.yaxis.set_major_formatter(ticker.PercentFormatter(xmax=1.0))
-    format_block_axis(ax, x_values, labels, bucket_size)
-    ymax = max(avg_refund_ratio) if avg_refund_ratio else 0.0
-    ax.set_ylim(0, ymax * 1.25 if ymax > 0 else 1.0)
+    ax_ratio.bar(x_values, block_refund_ratio, color="#8172B2", edgecolor="black", linewidth=0.5)
+    ax_ratio.set_title(f"Replay Refund / Block Gas Used {range_suffix}")
+    ax_ratio.set_ylabel("Refund Ratio")
+    ax_ratio.yaxis.set_major_formatter(ticker.PercentFormatter(xmax=1.0))
+    format_block_axis(ax_ratio, x_values, labels, bucket_size)
+    ymax = max(block_refund_ratio) if block_refund_ratio else 0.0
+    ax_ratio.set_ylim(0, ymax * 1.25 if ymax > 0 else 1.0)
     if len(grouped_blocks) <= 5:
-        for bar, val in zip(bars, avg_refund_ratio):
-            ax.text(
-                bar.get_x() + bar.get_width() / 2,
-                bar.get_height() + 0.01,
+        for idx, val in enumerate(block_refund_ratio):
+            ax_ratio.text(
+                idx,
+                val + 0.01,
                 f"{val:.1%}",
                 ha="center",
                 va="bottom",
                 fontsize=8,
             )
 
-    ax = axes[1][0]
     has_tx_data = any(tx_grouped_tx_ratios)
     if has_tx_data:
         if tx_bucket_size > 1 or len(tx_grouped_blocks) > 20:
             non_empty = [(idx, ratios) for idx, ratios in enumerate(tx_grouped_tx_ratios) if ratios]
-            bp = ax.boxplot(
+            bp = ax_tx.boxplot(
                 [ratios for _, ratios in non_empty],
                 positions=[idx + 1 for idx, _ in non_empty],
                 patch_artist=True,
@@ -331,29 +446,28 @@ def plot_replay(run_config, summary, blocks, tx_ratios, output_path):
             for patch in bp["boxes"]:
                 patch.set_facecolor("#DD8452")
                 patch.set_alpha(0.65)
-            ax.set_xlim(0.5, len(tx_grouped_blocks) + 0.5)
+            ax_tx.set_xlim(0.5, len(tx_grouped_blocks) + 0.5)
             tick_positions = [idx + 1 for idx in tx_x_values]
-            format_block_axis(ax, tick_positions, tx_labels, tx_bucket_size)
+            format_block_axis(ax_tx, tick_positions, tx_labels, tx_bucket_size)
         else:
             for idx, ratios in enumerate(tx_grouped_tx_ratios):
                 if not ratios:
                     continue
-                ax.scatter([idx] * len(ratios), ratios, alpha=0.55, s=16, color="#DD8452")
-            format_block_axis(ax, tx_x_values, tx_labels, tx_bucket_size)
+                ax_tx.scatter([idx] * len(ratios), ratios, alpha=0.55, s=16, color="#DD8452")
+            format_block_axis(ax_tx, tx_x_values, tx_labels, tx_bucket_size)
     else:
-        format_block_axis(ax, tx_x_values, tx_labels, tx_bucket_size)
-        ax.text(0.5, 0.5, "No tx-level records\n(summary-only input)", ha="center", va="center", transform=ax.transAxes)
-    ax.set_title(f"Tx Refund Ratio Distribution {tx_range_suffix}")
-    ax.set_ylabel("Refund Ratio")
-    ax.yaxis.set_major_formatter(ticker.PercentFormatter(xmax=1.0))
+        format_block_axis(ax_tx, tx_x_values, tx_labels, tx_bucket_size)
+        ax_tx.text(0.5, 0.5, "No tx-level records\n(summary-only input)", ha="center", va="center", transform=ax_tx.transAxes)
+    ax_tx.set_title(f"Tx Refund Ratio Distribution {tx_range_suffix}")
+    ax_tx.set_ylabel("Refund Ratio")
+    ax_tx.yaxis.set_major_formatter(ticker.PercentFormatter(xmax=1.0))
 
-    ax = axes[1][1]
     width = 0.35
     import numpy as np
 
     x = np.arange(len(grouped_blocks))
-    ax.bar(x - width / 2, user_txs, width, label="User Txs", color="#4C72B0", edgecolor="black", linewidth=0.5)
-    ax.bar(
+    ax_counts.bar(x - width / 2, user_txs, width, label="User Txs", color="#4C72B0", edgecolor="black", linewidth=0.5)
+    ax_counts.bar(
         x + width / 2,
         payload_entries,
         width,
@@ -362,10 +476,12 @@ def plot_replay(run_config, summary, blocks, tx_ratios, output_path):
         edgecolor="black",
         linewidth=0.5,
     )
-    ax.set_title(f"User Tx Count and SDM Payload Entries {range_suffix}")
-    ax.set_ylabel("Count")
-    format_block_axis(ax, list(x), labels, bucket_size)
-    ax.legend(loc="upper right")
+    ax_counts.set_title(f"User Tx Count and SDM Payload Entries {range_suffix}")
+    ax_counts.set_ylabel("Count")
+    format_block_axis(ax_counts, list(x), labels, bucket_size)
+    ax_counts.legend(loc="upper right")
+
+    add_refund_rankings_table(ax_table, blocks)
 
     plt.tight_layout(rect=(0, 0, 1, 0.93))
     plt.savefig(output_path, dpi=150, bbox_inches="tight")

@@ -1,6 +1,7 @@
 use crate::types::{
     SdmMode, SdmReplayBlock, SdmReplayConfig, SdmReplayMismatch, SdmReplayMismatchKind,
-    SdmReplayPayload, SdmReplayPayloadEntry, SdmReplaySummary, SdmReplayTx,
+    SdmReplayPayload, SdmReplayPayloadEntry, SdmReplayRefundEvent, SdmReplayRefundKind,
+    SdmReplaySummary, SdmReplayTx,
 };
 use alloy_consensus::{Block as AlloyBlock, BlockBody, BlockHeader, TxReceipt, Typed2718};
 use op_alloy_consensus::sdm::{SDM_TX_TYPE_ID, SDMGasEntry, SDMPayload};
@@ -9,7 +10,12 @@ use reth_execution_errors::BlockExecutionError;
 use reth_optimism_evm::{ConfigureSdmEvm, sdm::SdmExecutorExt};
 use reth_optimism_primitives::{OpBlock, OpPrimitives};
 use reth_primitives_traits::{Block, RecoveredBlock};
-use revm::database::{State, states::bundle_state::BundleRetention};
+use revm::{
+    context_interface::journaled_state::persistent_warm_cache::{
+        WarmingRefundEvent, WarmingRefundKind,
+    },
+    database::{State, states::bundle_state::BundleRetention},
+};
 use std::collections::{BTreeMap, BTreeSet};
 
 /// Replay error.
@@ -71,6 +77,41 @@ fn normalize_block(block: &RecoveredBlock<OpBlock>) -> NormalizedBlock {
     );
 
     NormalizedBlock { replay_block, original_indexes, embedded_payload, sdm_tx_index }
+}
+
+fn into_refund_kind(kind: WarmingRefundKind) -> SdmReplayRefundKind {
+    match kind {
+        WarmingRefundKind::WarmAccount => SdmReplayRefundKind::WarmAccount,
+        WarmingRefundKind::WarmSload => SdmReplayRefundKind::WarmSload,
+        WarmingRefundKind::WarmSstore => SdmReplayRefundKind::WarmSstore,
+    }
+}
+
+fn into_refund_event(
+    event: WarmingRefundEvent,
+    claiming_replay_tx_index: u64,
+    original_indexes: &[u64],
+) -> SdmReplayRefundEvent {
+    let first_warmed_by_replay_tx_index = event.first_warmed_by_tx_index;
+    let claiming_tx_index = original_indexes
+        .get(claiming_replay_tx_index as usize)
+        .copied()
+        .unwrap_or(claiming_replay_tx_index);
+    let first_warmed_by_tx_index = original_indexes
+        .get(first_warmed_by_replay_tx_index as usize)
+        .copied()
+        .unwrap_or(first_warmed_by_replay_tx_index);
+
+    SdmReplayRefundEvent {
+        claiming_replay_tx_index,
+        claiming_tx_index,
+        kind: into_refund_kind(event.kind),
+        amount: event.amount,
+        address: event.address,
+        slot: event.slot.map(Into::into),
+        first_warmed_by_replay_tx_index,
+        first_warmed_by_tx_index,
+    }
 }
 
 fn build_payload_map(
@@ -178,6 +219,7 @@ where
         executor.execute_transaction(tx)?;
     }
     let replay_entries: Vec<SDMGasEntry> = executor.take_sdm_entries();
+    let warming_events_by_tx = executor.take_warming_events_by_tx();
     let execution = executor.apply_post_execution_changes()?;
 
     state.merge_transitions(BundleRetention::Reverts);
@@ -206,6 +248,13 @@ where
         let replay_refund = replay_refunds.get(&tx_index).copied().unwrap_or_default();
         let payload_refund = payload_refunds.get(&tx_index).copied();
         let receipt_refund = receipt_refunds.get(&tx_index).copied();
+        let refund_breakdown = warming_events_by_tx
+            .get(replay_idx)
+            .cloned()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|event| into_refund_event(event, replay_idx as u64, &normalized.original_indexes))
+            .collect::<Vec<_>>();
         let mut mismatch = false;
 
         if config.compare_payload && payload_refund.unwrap_or_default() != replay_refund {
@@ -243,6 +292,7 @@ where
             op_gas_refund_payload: payload_refund,
             op_gas_refund_receipt: receipt_refund,
             effective_gas: gas_used.saturating_sub(replay_refund),
+            refund_breakdown,
             mismatch,
         });
     }

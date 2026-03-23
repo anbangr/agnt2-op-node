@@ -14,6 +14,7 @@ use context_interface::{
     journaled_state::{
         AccountInfoLoad, AccountLoad, JournalCheckpoint, JournalLoadError, JournalTr,
         TransferError, account::JournaledAccount,
+        persistent_warm_cache::WarmingRefundEvent,
     },
 };
 use core::ops::{Deref, DerefMut};
@@ -357,6 +358,11 @@ impl<DB: Database, ENTRY: JournalEntryTr> JournalTr for Journal<DB, ENTRY> {
     #[inline]
     fn take_last_tx_warming_savings(&mut self) -> u64 {
         self.inner.take_last_tx_warming_savings()
+    }
+
+    #[inline]
+    fn take_last_tx_warming_events(&mut self) -> Vec<WarmingRefundEvent> {
+        self.inner.take_last_tx_warming_events()
     }
 
     #[inline]

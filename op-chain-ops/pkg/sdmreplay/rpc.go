@@ -107,19 +107,32 @@ type ReplaySdmConfig struct {
 	CompareReceipts bool   `json:"compare_receipts"`
 }
 
+// ReplaySdmRefundEvent is one exact refund attribution event from debug_replaySdmBlock.
+type ReplaySdmRefundEvent struct {
+	ClaimingReplayTxIndex      uint64         `json:"claiming_replay_tx_index"`
+	ClaimingTxIndex            uint64         `json:"claiming_tx_index"`
+	Kind                       string         `json:"kind"`
+	Amount                     uint64         `json:"amount"`
+	Address                    common.Address `json:"address"`
+	Slot                       *common.Hash   `json:"slot"`
+	FirstWarmedByReplayTxIndex uint64         `json:"first_warmed_by_replay_tx_index"`
+	FirstWarmedByTxIndex       uint64         `json:"first_warmed_by_tx_index"`
+}
+
 // ReplaySdmTx is the per-transaction output from debug_replaySdmBlock.
 type ReplaySdmTx struct {
-	TxIndex            uint64      `json:"tx_index"`
-	ReplayTxIndex      uint64      `json:"replay_tx_index"`
-	TxHash             common.Hash `json:"tx_hash"`
-	TxType             uint64      `json:"tx_type"`
-	IsDepositTx        bool        `json:"is_deposit_tx"`
-	GasUsed            uint64      `json:"gas_used"`
-	OPGasRefundReplay  uint64      `json:"op_gas_refund_replay"`
-	OPGasRefundPayload *uint64     `json:"op_gas_refund_payload"`
-	OPGasRefundReceipt *uint64     `json:"op_gas_refund_receipt"`
-	EffectiveGas       uint64      `json:"effective_gas"`
-	Mismatch           bool        `json:"mismatch"`
+	TxIndex            uint64                 `json:"tx_index"`
+	ReplayTxIndex      uint64                 `json:"replay_tx_index"`
+	TxHash             common.Hash            `json:"tx_hash"`
+	TxType             uint64                 `json:"tx_type"`
+	IsDepositTx        bool                   `json:"is_deposit_tx"`
+	GasUsed            uint64                 `json:"gas_used"`
+	OPGasRefundReplay  uint64                 `json:"op_gas_refund_replay"`
+	OPGasRefundPayload *uint64                `json:"op_gas_refund_payload"`
+	OPGasRefundReceipt *uint64                `json:"op_gas_refund_receipt"`
+	EffectiveGas       uint64                 `json:"effective_gas"`
+	RefundBreakdown    []ReplaySdmRefundEvent `json:"refund_breakdown"`
+	Mismatch           bool                   `json:"mismatch"`
 }
 
 // ReplaySdmMismatch is one mismatch row from debug_replaySdmBlock.

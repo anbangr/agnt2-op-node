@@ -77,6 +77,7 @@ type BlockRecord struct {
 	BlockGasUsed           uint64  `json:"block_gas_used"`
 	BlockOPGasRefund       uint64  `json:"block_op_gas_refund"`
 	BlockEffectiveGas      uint64  `json:"block_effective_gas"`
+	BlockRefundRatio       float64 `json:"block_refund_ratio"`
 	AvgRefundRatio         float64 `json:"avg_refund_ratio"`
 	NodeReceiptRefundTotal uint64  `json:"node_receipt_refund_total"`
 	ReplayRefundTotal      uint64  `json:"replay_refund_total"`
@@ -100,6 +101,7 @@ type SummaryRecord struct {
 	NodeReceiptRefundTotal uint64  `json:"node_receipt_refund_total"`
 	PayloadRefundTotal     uint64  `json:"payload_refund_total"`
 	EffectiveGasTotal      uint64  `json:"effective_gas_total"`
+	TotalRefundRatio       float64 `json:"total_refund_ratio"`
 	AvgRefundRatio         float64 `json:"avg_refund_ratio"`
 	MismatchCount          int     `json:"mismatch_count"`
 	ReplayMode             string  `json:"replay_mode"`

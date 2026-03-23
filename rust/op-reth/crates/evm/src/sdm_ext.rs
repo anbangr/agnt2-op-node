@@ -1,7 +1,9 @@
 use alloc::{sync::Arc, vec::Vec};
 use alloy_consensus::Header;
 use alloy_evm::{FromRecoveredTx, FromTxWithEncoded, block::BlockExecutorFor};
-use alloy_op_evm::{OpBlockExecutor, block::receipt_builder::OpReceiptBuilder, sdm::SdmExecutorExt};
+use alloy_op_evm::{
+    OpBlockExecutor, block::receipt_builder::OpReceiptBuilder, sdm::SdmExecutorExt,
+};
 use reth_chainspec::EthChainSpec;
 use reth_evm::{
     ConfigureEvm, Database,
@@ -77,7 +79,9 @@ where
             self.executor_factory.spec(),
             self.executor_factory.receipt_builder(),
         )
-        .with_warming_savings(alloy_op_evm::sdm::SdmEvmExt::take_last_tx_warming_savings))
+        .with_warming_savings(alloy_op_evm::sdm::SdmEvmExt::take_last_tx_warming_savings)
+        .with_warming_events(alloy_op_evm::sdm::SdmEvmExt::take_last_tx_warming_events)
+        .with_warming_tx_index(alloy_op_evm::sdm::SdmEvmExt::set_persistent_warming_tx_index))
     }
 
     fn sdm_builder_for_next_block<'a, DB: Database + 'a>(
@@ -101,7 +105,9 @@ where
             self.executor_factory.spec(),
             self.executor_factory.receipt_builder(),
         )
-        .with_warming_savings(alloy_op_evm::sdm::SdmEvmExt::take_last_tx_warming_savings);
+        .with_warming_savings(alloy_op_evm::sdm::SdmEvmExt::take_last_tx_warming_savings)
+        .with_warming_events(alloy_op_evm::sdm::SdmEvmExt::take_last_tx_warming_events)
+        .with_warming_tx_index(alloy_op_evm::sdm::SdmEvmExt::set_persistent_warming_tx_index);
 
         Ok(BasicBlockBuilder::<
             'a,
