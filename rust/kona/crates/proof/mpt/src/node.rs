@@ -163,7 +163,7 @@ impl TrieNode {
             }
             Self::Leaf { prefix, value } => Ok((path == prefix).then_some(value)),
             Self::Extension { prefix, node } => {
-                if path.slice(..prefix.len()) == *prefix {
+                if path.len() >= prefix.len() && path.slice(..prefix.len()) == *prefix {
                     // Follow extension branch
                     node.unblind(fetcher)?;
                     node.open(&path.slice(prefix.len()..), fetcher)
