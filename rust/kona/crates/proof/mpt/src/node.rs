@@ -794,6 +794,22 @@ mod test {
         assert_eq!(node, expected);
     }
 
+    #[test]
+    fn test_extension_open_path_shorter_than_prefix_no_panic() {
+        // Regression test: `open` must not panic when the path is shorter than the
+        // extension prefix. Previously, `path.slice(..prefix.len())` would panic in
+        // this case; now it should return `Ok(None)`.
+        let leaf =
+            TrieNode::Leaf { prefix: Nibbles::default(), value: bytes!("deadbeef") };
+        let mut node = TrieNode::Extension {
+            prefix: Nibbles::from_nibbles([0x0a, 0x0b, 0x0c]),
+            node: Box::new(leaf),
+        };
+        // Path has only 1 nibble; prefix has 3 — previously would panic.
+        let short_path = Nibbles::from_nibbles([0x0a]);
+        assert_eq!(node.open(&short_path, &NoopTrieProvider).unwrap(), None);
+    }
+
     proptest::proptest! {
         /// Differential test for inserting an arbitrary number of keys into an empty `TrieNode` / `HashBuilder`.
         #[test]
