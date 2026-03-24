@@ -162,8 +162,13 @@ impl TrieNode {
                     .unwrap_or(Ok(None))
             }
             Self::Leaf { prefix, value } => Ok((path == prefix).then_some(value)),
-            Self::Extension { prefix, node } => {
-                if path.len() >= prefix.len() && path.slice(..prefix.len()) == *prefix {
+            Self::Extension { prefix, node: _ } if path.len() < prefix.len() => {
+                Err(TrieNodeError::PathTooShort)
+            }
+            Self::Extension { prefix, node } =>
+            // Implied `path.len() >= prefix.len()`
+            {
+                if path.slice(..prefix.len()) == *prefix {
                     // Follow extension branch
                     node.unblind(fetcher)?;
                     node.open(&path.slice(prefix.len()..), fetcher)
@@ -799,8 +804,7 @@ mod test {
         // Regression test: `open` must not panic when the path is shorter than the
         // extension prefix. Previously, `path.slice(..prefix.len())` would panic in
         // this case; now it should return `Ok(None)`.
-        let leaf =
-            TrieNode::Leaf { prefix: Nibbles::default(), value: bytes!("deadbeef") };
+        let leaf = TrieNode::Leaf { prefix: Nibbles::default(), value: bytes!("deadbeef") };
         let mut node = TrieNode::Extension {
             prefix: Nibbles::from_nibbles([0x0a, 0x0b, 0x0c]),
             node: Box::new(leaf),
