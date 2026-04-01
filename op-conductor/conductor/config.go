@@ -151,8 +151,8 @@ func (c *Config) Check() error {
 	if err := c.RPC.Check(); err != nil {
 		return errors.Wrap(err, "invalid rpc config")
 	}
-	if c.HTTPBodyLimitMB < 5 {
-		return fmt.Errorf("HTTP body limit must be at least 5MB, got %dMB", c.HTTPBodyLimitMB)
+	if c.HTTPBodyLimitMB <= 0 {
+		return fmt.Errorf("HTTP body limit must be greater than 0, got %dMB", c.HTTPBodyLimitMB)
 	}
 	return nil
 }
