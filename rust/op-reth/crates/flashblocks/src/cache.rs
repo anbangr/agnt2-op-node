@@ -853,11 +853,10 @@ mod tests {
     };
     use alloy_primitives::B256;
     use alloy_rpc_types_engine::PayloadId;
-    use op_alloy_consensus::OpTxEnvelope;
-    use reth_optimism_primitives::OpPrimitives;
+    use reth_optimism_primitives::{OpPrimitives, OpTransactionSigned};
 
     fn canonical_for(
-        manager: &SequenceManager<OpTxEnvelope>,
+        manager: &SequenceManager<OpTransactionSigned>,
         block_number: u64,
         tx_hashes: Vec<B256>,
     ) -> CanonicalBlockFingerprint {
@@ -880,13 +879,13 @@ mod tests {
 
     #[test]
     fn test_sequence_manager_new() {
-        let manager: SequenceManager<OpTxEnvelope> = SequenceManager::new(true);
+        let manager: SequenceManager<OpTransactionSigned> = SequenceManager::new(true);
         assert_eq!(manager.pending().count(), 0);
     }
 
     #[test]
     fn test_insert_flashblock_creates_pending_sequence() {
-        let mut manager: SequenceManager<OpTxEnvelope> = SequenceManager::new(true);
+        let mut manager: SequenceManager<OpTransactionSigned> = SequenceManager::new(true);
         let factory = TestFlashBlockFactory::new();
 
         let fb0 = factory.flashblock_at(0).build();
@@ -898,7 +897,7 @@ mod tests {
 
     #[test]
     fn test_insert_flashblock_caches_completed_sequence() {
-        let mut manager: SequenceManager<OpTxEnvelope> = SequenceManager::new(true);
+        let mut manager: SequenceManager<OpTransactionSigned> = SequenceManager::new(true);
         let factory = TestFlashBlockFactory::new();
 
         // Build first sequence
@@ -922,7 +921,7 @@ mod tests {
 
     #[test]
     fn test_next_buildable_args_returns_none_when_empty() {
-        let mut manager: SequenceManager<OpTxEnvelope> = SequenceManager::new(true);
+        let mut manager: SequenceManager<OpTransactionSigned> = SequenceManager::new(true);
         let local_tip_hash = B256::random();
         let local_tip_timestamp = 1000;
 
@@ -933,7 +932,7 @@ mod tests {
 
     #[test]
     fn test_next_buildable_args_matches_pending_parent() {
-        let mut manager: SequenceManager<OpTxEnvelope> = SequenceManager::new(true);
+        let mut manager: SequenceManager<OpTransactionSigned> = SequenceManager::new(true);
         let factory = TestFlashBlockFactory::new();
 
         let fb0 = factory.flashblock_at(0).build();
@@ -949,7 +948,7 @@ mod tests {
 
     #[test]
     fn test_next_buildable_args_returns_none_when_parent_mismatch() {
-        let mut manager: SequenceManager<OpTxEnvelope> = SequenceManager::new(true);
+        let mut manager: SequenceManager<OpTransactionSigned> = SequenceManager::new(true);
         let factory = TestFlashBlockFactory::new();
 
         let fb0 = factory.flashblock_at(0).build();
@@ -963,7 +962,7 @@ mod tests {
 
     #[test]
     fn test_next_buildable_args_prefers_pending_over_cached() {
-        let mut manager: SequenceManager<OpTxEnvelope> = SequenceManager::new(true);
+        let mut manager: SequenceManager<OpTransactionSigned> = SequenceManager::new(true);
         let factory = TestFlashBlockFactory::new();
 
         // Create and finalize first sequence
@@ -982,7 +981,7 @@ mod tests {
 
     #[test]
     fn test_next_buildable_args_finds_cached_sequence() {
-        let mut manager: SequenceManager<OpTxEnvelope> = SequenceManager::new(true);
+        let mut manager: SequenceManager<OpTransactionSigned> = SequenceManager::new(true);
         let factory = TestFlashBlockFactory::new();
 
         // Build and cache first sequence
@@ -1005,7 +1004,7 @@ mod tests {
 
     #[test]
     fn test_next_buildable_args_uses_newest_cached_when_parent_hash_shared() {
-        let mut manager: SequenceManager<OpTxEnvelope> = SequenceManager::new(true);
+        let mut manager: SequenceManager<OpTransactionSigned> = SequenceManager::new(true);
         let factory = TestFlashBlockFactory::new();
 
         let shared_parent = B256::repeat_byte(0x44);
@@ -1051,7 +1050,7 @@ mod tests {
         use reth_revm::cached::CachedReads;
         use std::sync::Arc;
 
-        let mut manager: SequenceManager<OpTxEnvelope> = SequenceManager::new(true);
+        let mut manager: SequenceManager<OpTransactionSigned> = SequenceManager::new(true);
         let factory = TestFlashBlockFactory::new();
 
         // Block 100 with three flashblocks.
@@ -1111,7 +1110,7 @@ mod tests {
     fn test_cached_sequence_with_provided_state_root_not_reselected_after_apply() {
         use reth_revm::cached::CachedReads;
 
-        let mut manager: SequenceManager<OpTxEnvelope> = SequenceManager::new(true);
+        let mut manager: SequenceManager<OpTransactionSigned> = SequenceManager::new(true);
         let factory = TestFlashBlockFactory::new();
         let provided_root = B256::repeat_byte(0xA5);
 
@@ -1156,7 +1155,7 @@ mod tests {
         use reth_revm::cached::CachedReads;
         use std::sync::Arc;
 
-        let mut manager: SequenceManager<OpTxEnvelope> = SequenceManager::new(true);
+        let mut manager: SequenceManager<OpTransactionSigned> = SequenceManager::new(true);
         let factory = TestFlashBlockFactory::new();
 
         // Canonical tip is block 9. Flashblocks for block 10 all build on block 9.
@@ -1236,7 +1235,7 @@ mod tests {
 
     #[test]
     fn test_cached_entry_lookup_is_exact_by_sequence_id() {
-        let mut manager: SequenceManager<OpTxEnvelope> = SequenceManager::new(true);
+        let mut manager: SequenceManager<OpTransactionSigned> = SequenceManager::new(true);
         let factory = TestFlashBlockFactory::new();
 
         let shared_parent = B256::repeat_byte(0x55);
@@ -1281,7 +1280,7 @@ mod tests {
 
     #[test]
     fn test_reorg_detection_uses_newest_cached_variant_for_block_number() {
-        let mut manager: SequenceManager<OpTxEnvelope> = SequenceManager::new(true);
+        let mut manager: SequenceManager<OpTransactionSigned> = SequenceManager::new(true);
         let factory = TestFlashBlockFactory::new();
 
         let shared_parent = B256::repeat_byte(0x66);
@@ -1336,7 +1335,7 @@ mod tests {
 
     #[test]
     fn test_on_build_complete_ignores_unknown_sequence_id() {
-        let mut manager: SequenceManager<OpTxEnvelope> = SequenceManager::new(true);
+        let mut manager: SequenceManager<OpTransactionSigned> = SequenceManager::new(true);
         let factory = TestFlashBlockFactory::new();
 
         // Build one cached sequence and one pending sequence.
@@ -1401,7 +1400,7 @@ mod tests {
 
     #[test]
     fn test_pending_build_ticket_rejects_stale_revision() {
-        let mut manager: SequenceManager<OpTxEnvelope> = SequenceManager::new(true);
+        let mut manager: SequenceManager<OpTransactionSigned> = SequenceManager::new(true);
         let factory = TestFlashBlockFactory::new();
 
         let fb0 = factory.flashblock_at(0).build();
@@ -1470,7 +1469,7 @@ mod tests {
 
     #[test]
     fn test_compute_state_root_logic_near_expected_final() {
-        let mut manager: SequenceManager<OpTxEnvelope> = SequenceManager::new(true);
+        let mut manager: SequenceManager<OpTransactionSigned> = SequenceManager::new(true);
         let block_time = 2u64;
         let factory = TestFlashBlockFactory::new().with_block_time(block_time);
 
@@ -1498,7 +1497,7 @@ mod tests {
 
     #[test]
     fn test_no_compute_state_root_when_provided_by_sequencer() {
-        let mut manager: SequenceManager<OpTxEnvelope> = SequenceManager::new(true);
+        let mut manager: SequenceManager<OpTransactionSigned> = SequenceManager::new(true);
         let block_time = 2u64;
         let factory = TestFlashBlockFactory::new().with_block_time(block_time);
 
@@ -1519,7 +1518,7 @@ mod tests {
 
     #[test]
     fn test_no_compute_state_root_when_disabled() {
-        let mut manager: SequenceManager<OpTxEnvelope> = SequenceManager::new(false);
+        let mut manager: SequenceManager<OpTransactionSigned> = SequenceManager::new(false);
         let block_time = 2u64;
         let factory = TestFlashBlockFactory::new().with_block_time(block_time);
 
@@ -1547,7 +1546,7 @@ mod tests {
 
     #[test]
     fn test_compute_state_root_with_timestamp_skew_does_not_underflow() {
-        let mut manager: SequenceManager<OpTxEnvelope> = SequenceManager::new(true);
+        let mut manager: SequenceManager<OpTransactionSigned> = SequenceManager::new(true);
         let factory = TestFlashBlockFactory::new();
 
         let fb0 = factory.flashblock_at(0).state_root(B256::ZERO).build();
@@ -1564,7 +1563,7 @@ mod tests {
 
     #[test]
     fn test_cache_ring_buffer_evicts_oldest() {
-        let mut manager: SequenceManager<OpTxEnvelope> = SequenceManager::new(true);
+        let mut manager: SequenceManager<OpTransactionSigned> = SequenceManager::new(true);
         let factory = TestFlashBlockFactory::new();
 
         // Fill cache with 4 sequences (cache size is 3, so oldest should be evicted)
@@ -1587,7 +1586,7 @@ mod tests {
 
     #[test]
     fn test_process_canonical_block_no_pending_state() {
-        let mut manager: SequenceManager<OpTxEnvelope> = SequenceManager::new(true);
+        let mut manager: SequenceManager<OpTransactionSigned> = SequenceManager::new(true);
 
         // No pending state, should return NoPendingState
         let canonical = canonical_for(&manager, 100, vec![]);
@@ -1597,7 +1596,7 @@ mod tests {
 
     #[test]
     fn test_process_canonical_block_catchup() {
-        let mut manager: SequenceManager<OpTxEnvelope> = SequenceManager::new(true);
+        let mut manager: SequenceManager<OpTransactionSigned> = SequenceManager::new(true);
         let factory = TestFlashBlockFactory::new();
 
         // Insert a flashblock sequence for block 100
@@ -1617,7 +1616,7 @@ mod tests {
 
     #[test]
     fn test_process_canonical_block_continue() {
-        let mut manager: SequenceManager<OpTxEnvelope> = SequenceManager::new(true);
+        let mut manager: SequenceManager<OpTransactionSigned> = SequenceManager::new(true);
         let factory = TestFlashBlockFactory::new();
 
         // Insert flashblocks for block 100-102
@@ -1641,7 +1640,7 @@ mod tests {
 
     #[test]
     fn test_process_canonical_block_depth_limit_exceeded() {
-        let mut manager: SequenceManager<OpTxEnvelope> = SequenceManager::new(true);
+        let mut manager: SequenceManager<OpTransactionSigned> = SequenceManager::new(true);
         let factory = TestFlashBlockFactory::new();
 
         // Insert flashblocks for block 100-102
@@ -1668,7 +1667,7 @@ mod tests {
 
     #[test]
     fn test_earliest_and_latest_block_numbers() {
-        let mut manager: SequenceManager<OpTxEnvelope> = SequenceManager::new(true);
+        let mut manager: SequenceManager<OpTransactionSigned> = SequenceManager::new(true);
         let factory = TestFlashBlockFactory::new();
 
         // Initially no blocks
@@ -1699,7 +1698,7 @@ mod tests {
 
     #[test]
     fn test_earliest_block_number_tracks_cache_rollover() {
-        let mut manager: SequenceManager<OpTxEnvelope> = SequenceManager::new(true);
+        let mut manager: SequenceManager<OpTransactionSigned> = SequenceManager::new(true);
         let factory = TestFlashBlockFactory::new();
 
         let fb0 = factory.flashblock_at(0).build();
@@ -1731,7 +1730,7 @@ mod tests {
         use reth_revm::cached::CachedReads;
         use std::sync::Arc;
 
-        let mut manager: SequenceManager<OpTxEnvelope> = SequenceManager::new(true);
+        let mut manager: SequenceManager<OpTransactionSigned> = SequenceManager::new(true);
         let factory = TestFlashBlockFactory::new();
 
         // Create a flashblock for block 101
@@ -1774,7 +1773,7 @@ mod tests {
         use reth_revm::cached::CachedReads;
         use std::sync::Arc;
 
-        let mut manager: SequenceManager<OpTxEnvelope> = SequenceManager::new(true);
+        let mut manager: SequenceManager<OpTransactionSigned> = SequenceManager::new(true);
         let factory = TestFlashBlockFactory::new();
 
         // Create and cache first sequence for block 100
@@ -1820,7 +1819,7 @@ mod tests {
         use reth_revm::cached::CachedReads;
         use std::sync::Arc;
 
-        let mut manager: SequenceManager<OpTxEnvelope> = SequenceManager::new(true);
+        let mut manager: SequenceManager<OpTransactionSigned> = SequenceManager::new(true);
         let factory = TestFlashBlockFactory::new();
 
         // Create a flashblock for block 100
@@ -1852,7 +1851,7 @@ mod tests {
 
     #[test]
     fn test_catchup_clears_all_cached_sequences() {
-        let mut manager: SequenceManager<OpTxEnvelope> = SequenceManager::new(true);
+        let mut manager: SequenceManager<OpTransactionSigned> = SequenceManager::new(true);
         let factory = TestFlashBlockFactory::new();
 
         // Build up cached sequences for blocks 100, 101, 102
@@ -1881,7 +1880,7 @@ mod tests {
 
     #[test]
     fn test_reorg_clears_all_cached_sequences() {
-        let mut manager: SequenceManager<OpTxEnvelope> = SequenceManager::new(true);
+        let mut manager: SequenceManager<OpTransactionSigned> = SequenceManager::new(true);
         let factory = TestFlashBlockFactory::new();
 
         // Build pending sequence for block 100
@@ -1918,7 +1917,7 @@ mod tests {
 
     #[test]
     fn test_depth_limit_exceeded_clears_all_state() {
-        let mut manager: SequenceManager<OpTxEnvelope> = SequenceManager::new(true);
+        let mut manager: SequenceManager<OpTransactionSigned> = SequenceManager::new(true);
         let factory = TestFlashBlockFactory::new();
 
         // Build sequences for blocks 100-102
@@ -1948,7 +1947,7 @@ mod tests {
 
     #[test]
     fn test_continue_preserves_all_state() {
-        let mut manager: SequenceManager<OpTxEnvelope> = SequenceManager::new(true);
+        let mut manager: SequenceManager<OpTransactionSigned> = SequenceManager::new(true);
         let factory = TestFlashBlockFactory::new();
 
         // Build sequences for blocks 100-102
@@ -1975,7 +1974,7 @@ mod tests {
 
     #[test]
     fn test_clear_all_removes_pending_and_cache() {
-        let mut manager: SequenceManager<OpTxEnvelope> = SequenceManager::new(true);
+        let mut manager: SequenceManager<OpTransactionSigned> = SequenceManager::new(true);
         let factory = TestFlashBlockFactory::new();
 
         // Build up state
@@ -2005,7 +2004,7 @@ mod tests {
 
     #[test]
     fn test_tracked_fingerprint_returns_none_for_unknown_block() {
-        let manager: SequenceManager<OpTxEnvelope> = SequenceManager::new(true);
+        let manager: SequenceManager<OpTransactionSigned> = SequenceManager::new(true);
 
         // No flashblocks inserted, should return none
         let fingerprint = manager.tracked_fingerprint_for_block(100);
@@ -2014,7 +2013,7 @@ mod tests {
 
     #[test]
     fn test_no_false_reorg_for_untracked_block() {
-        let mut manager: SequenceManager<OpTxEnvelope> = SequenceManager::new(true);
+        let mut manager: SequenceManager<OpTransactionSigned> = SequenceManager::new(true);
         let factory = TestFlashBlockFactory::new();
 
         // Build pending sequence for block 100
@@ -2045,7 +2044,7 @@ mod tests {
 
     #[test]
     fn test_reorg_detected_for_tracked_block_with_different_txs() {
-        let mut manager: SequenceManager<OpTxEnvelope> = SequenceManager::new(true);
+        let mut manager: SequenceManager<OpTransactionSigned> = SequenceManager::new(true);
         let factory = TestFlashBlockFactory::new();
 
         // Build pending sequence for block 100
@@ -2072,7 +2071,7 @@ mod tests {
 
     #[test]
     fn test_reorg_detected_for_tracked_block_with_parent_hash_mismatch() {
-        let mut manager: SequenceManager<OpTxEnvelope> = SequenceManager::new(true);
+        let mut manager: SequenceManager<OpTransactionSigned> = SequenceManager::new(true);
         let factory = TestFlashBlockFactory::new();
 
         // Build pending sequence for block 100 and cache it by starting block 101.
@@ -2099,7 +2098,7 @@ mod tests {
 
     #[test]
     fn test_reorg_detected_for_tracked_block_with_block_hash_mismatch() {
-        let mut manager: SequenceManager<OpTxEnvelope> = SequenceManager::new(true);
+        let mut manager: SequenceManager<OpTransactionSigned> = SequenceManager::new(true);
         let factory = TestFlashBlockFactory::new();
 
         // Build pending sequence for block 100 and cache it by starting block 101.
@@ -2126,7 +2125,7 @@ mod tests {
 
     #[test]
     fn test_tracked_fingerprint_for_pending_block() {
-        let mut manager: SequenceManager<OpTxEnvelope> = SequenceManager::new(true);
+        let mut manager: SequenceManager<OpTransactionSigned> = SequenceManager::new(true);
         let factory = TestFlashBlockFactory::new();
 
         // Create flashblock without transactions (empty tx list is valid)
@@ -2141,7 +2140,7 @@ mod tests {
 
     #[test]
     fn test_tracked_fingerprint_for_cached_block() {
-        let mut manager: SequenceManager<OpTxEnvelope> = SequenceManager::new(true);
+        let mut manager: SequenceManager<OpTransactionSigned> = SequenceManager::new(true);
         let factory = TestFlashBlockFactory::new();
 
         // Create first flashblock for block 100

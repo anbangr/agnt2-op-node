@@ -55,6 +55,7 @@ impl InMemorySize for OpTypedTransaction {
             Self::Eip1559(tx) => tx.size(),
             Self::Eip7702(tx) => tx.size(),
             Self::Deposit(tx) => tx.size(),
+            Self::PostExec(tx) => tx.size(),
         }
     }
 }
@@ -78,6 +79,9 @@ impl InMemorySize for OpTxEnvelope {
             Self::Eip1559(tx) => tx.size(),
             Self::Eip7702(tx) => tx.size(),
             Self::Deposit(tx) => core::mem::size_of::<alloy_primitives::B256>() + tx.inner().size(),
+            Self::PostExec(tx) => {
+                core::mem::size_of::<alloy_primitives::B256>() + tx.inner().size()
+            }
         }
     }
 }

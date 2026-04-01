@@ -25,8 +25,9 @@ reth-trie-common = { workspace = true, features = ["serde"] }
 reth-tasks.workspace = true
 
 # workaround: reth-trie/serde-bincode-compat activates serde-bincode-compat on
-# reth-ethereum-primitives (a transitive dep) without also activating its serde feature,
-# breaking compilation. Adding it as an optional dep lets us enable both features together.
+# reth-ethereum-primitives (a transitive dep) without also activating the full set of
+# companion features it needs to satisfy the bincode-compat trait bounds, breaking
+# compilation. Adding it as an optional dep lets us enable them together.
 reth-ethereum-primitives = { workspace = true, optional = true }
 
 # `metrics` feature
@@ -87,6 +88,7 @@ serde-bincode-compat = [
 	"reth-trie/serde-bincode-compat",
 	"dep:reth-ethereum-primitives",
 	"reth-ethereum-primitives?/serde",
+	"reth-ethereum-primitives?/reth-codec",
 ]
 metrics = [
 	"reth-trie/metrics",

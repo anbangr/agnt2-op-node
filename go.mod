@@ -280,7 +280,7 @@ require (
 	lukechampine.com/blake3 v1.3.0 // indirect
 )
 
-replace github.com/ethereum/go-ethereum => github.com/ethereum-optimism/op-geth v1.101701.0-rc.3
+replace github.com/ethereum/go-ethereum => github.com/ethereum-optimism/op-geth v1.101701.0-rc.3.0.20260319132439-bf0465a8f5d4
 
 // replace github.com/ethereum/go-ethereum => ../op-geth
 

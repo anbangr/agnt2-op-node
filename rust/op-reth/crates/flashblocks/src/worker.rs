@@ -505,7 +505,9 @@ mod tests {
     use reth_optimism_chainspec::OP_MAINNET;
     use reth_optimism_evm::OpEvmConfig;
     use reth_optimism_primitives::{OpPrimitives, OpTransactionSigned};
-    use reth_primitives_traits::{AlloyBlockHeader, Recovered, SignerRecoverable};
+    use reth_primitives_traits::{
+        AlloyBlockHeader, Recovered, SignerRecoverable, transaction::TxHashRef,
+    };
     use reth_provider::test_utils::{ExtendedAccount, MockEthProvider};
     use reth_storage_api::BlockReaderIdExt;
     use std::str::FromStr;

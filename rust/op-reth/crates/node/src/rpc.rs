@@ -7,7 +7,6 @@
 //!
 //! ```rust,no_run
 //! use alloy_rpc_types_eth::BlockId;
-//! use op_alloy_network::Optimism;
 //! use reth_db::test_utils::create_test_rw_db_with_path;
 //! use reth_node_builder::{
 //!     ConsensusEngineHandle, LaunchContext, NodeConfig, RethFullAdapter,
@@ -17,7 +16,7 @@
 //! };
 //! use reth_optimism_chainspec::OP_SEPOLIA;
 //! use reth_optimism_evm::OpEvmConfig;
-//! use reth_optimism_node::{OpExecutorBuilder, OpNetworkPrimitives, OpNode};
+//! use reth_optimism_node::{OpExecutorBuilder, OpNetworkPrimitives, OpNode, OpRpcTypes};
 //! use reth_optimism_rpc::OpEthApiBuilder;
 //! use reth_optimism_txpool::OpPooledTransaction;
 //! use reth_provider::providers::BlockchainProvider;
@@ -77,7 +76,7 @@
 //!         cache,
 //!         engine_handle: ConsensusEngineHandle::new(tx),
 //!     };
-//!     let eth_api = OpEthApiBuilder::<Optimism>::default().build_eth_api(ctx).await.unwrap();
+//!     let eth_api = OpEthApiBuilder::<OpRpcTypes>::default().build_eth_api(ctx).await.unwrap();
 //!
 //!     // build `trace` namespace API
 //!     let trace_api = TraceApi::new(eth_api, BlockingTaskGuard::new(10), EthConfig::default());

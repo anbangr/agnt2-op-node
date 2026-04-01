@@ -70,7 +70,7 @@ impl OpReceiptEnvelope<Log> {
             OpTxType::Eip2930 => {
                 Self::Eip2930(ReceiptWithBloom { receipt: inner_receipt, logs_bloom })
             }
-            OpTxType::Eip1559 => {
+            OpTxType::Eip1559 | OpTxType::PostExec => {
                 Self::Eip1559(ReceiptWithBloom { receipt: inner_receipt, logs_bloom })
             }
             OpTxType::Eip7702 => {
@@ -316,7 +316,7 @@ impl Decodable2718 for OpReceiptEnvelope {
                 Err(alloy_rlp::Error::Custom("type-0 eip2718 transactions are not supported")
                     .into())
             }
-            OpTxType::Eip1559 => Ok(Self::Eip1559(Decodable::decode(buf)?)),
+            OpTxType::Eip1559 | OpTxType::PostExec => Ok(Self::Eip1559(Decodable::decode(buf)?)),
             OpTxType::Eip7702 => Ok(Self::Eip7702(Decodable::decode(buf)?)),
             OpTxType::Eip2930 => Ok(Self::Eip2930(Decodable::decode(buf)?)),
             OpTxType::Deposit => Ok(Self::Deposit(Decodable::decode(buf)?)),

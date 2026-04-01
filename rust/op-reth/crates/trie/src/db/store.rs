@@ -1433,6 +1433,43 @@ mod tests {
     }
 
     #[test]
+    fn test_store_account_branches_with_prefix_keys() {
+        let dir = TempDir::new().unwrap();
+        let store = MdbxProofsStorage::new(dir.path()).expect("env");
+
+        let parent = Nibbles::from_nibbles_unchecked([0x01]);
+        let child = Nibbles::from_nibbles_unchecked([0x01, 0x00]);
+        let sibling = Nibbles::from_nibbles_unchecked([0x01, 0x01]);
+
+        let parent_branch = BranchNodeCompact::new(0b1, 0, 0, vec![], Some(B256::random()));
+        let child_branch = BranchNodeCompact::new(0b1, 0, 0, vec![], Some(B256::random()));
+
+        let updates = vec![
+            (sibling, None),
+            (parent, Some(parent_branch.clone())),
+            (child, Some(child_branch.clone())),
+        ];
+        store.store_account_branches(updates).expect("write");
+
+        let tx = store.env.tx().expect("ro tx");
+        let mut cur = tx.cursor_dup_read::<AccountTrieHistory>().expect("cursor");
+
+        let parent_v =
+            cur.seek_by_key_subkey(StoredNibbles::from(parent), B0).expect("seek").expect("exists");
+        assert_eq!(parent_v.value.0, Some(parent_branch));
+
+        let child_v =
+            cur.seek_by_key_subkey(StoredNibbles::from(child), B0).expect("seek").expect("exists");
+        assert_eq!(child_v.value.0, Some(child_branch));
+
+        let sibling_v = cur
+            .seek_by_key_subkey(StoredNibbles::from(sibling), B0)
+            .expect("seek")
+            .expect("exists");
+        assert_eq!(sibling_v.value.0, None);
+    }
+
+    #[test]
     fn store_account_branches_multiple_calls() {
         let dir = TempDir::new().unwrap();
         let store = MdbxProofsStorage::new(dir.path()).expect("env");

@@ -160,7 +160,7 @@ impl<T> OpReceipt<T> {
                     RlpDecodableReceipt::rlp_decode_with_bloom(buf)?;
                 Ok(ReceiptWithBloom { receipt: Self::Eip2930(receipt), logs_bloom })
             }
-            OpTxType::Eip1559 => {
+            OpTxType::Eip1559 | OpTxType::PostExec => {
                 let ReceiptWithBloom { receipt, logs_bloom } =
                     RlpDecodableReceipt::rlp_decode_with_bloom(buf)?;
                 Ok(ReceiptWithBloom { receipt: Self::Eip1559(receipt), logs_bloom })
@@ -256,7 +256,9 @@ impl<T> OpReceipt<T> {
         match tx_type {
             OpTxType::Legacy => Ok(Self::Legacy(Receipt { status, cumulative_gas_used, logs })),
             OpTxType::Eip2930 => Ok(Self::Eip2930(Receipt { status, cumulative_gas_used, logs })),
-            OpTxType::Eip1559 => Ok(Self::Eip1559(Receipt { status, cumulative_gas_used, logs })),
+            OpTxType::Eip1559 | OpTxType::PostExec => {
+                Ok(Self::Eip1559(Receipt { status, cumulative_gas_used, logs }))
+            }
             OpTxType::Eip7702 => Ok(Self::Eip7702(Receipt { status, cumulative_gas_used, logs })),
             OpTxType::Deposit => Ok(Self::Deposit(OpDepositReceipt {
                 inner: Receipt { status, cumulative_gas_used, logs },

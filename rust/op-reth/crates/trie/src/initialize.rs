@@ -17,8 +17,8 @@ use reth_db::{
 };
 use reth_primitives_traits::{Account, StorageEntry};
 use reth_trie_common::{
-    BranchNodeCompact, Nibbles, PackedStoredNibbles, StorageTrieEntry, StoredNibbles,
-    StoredNibblesSubKey,
+    BranchNodeCompact, Nibbles, PackedStorageTrieEntry, PackedStoredNibbles,
+    PackedStoredNibblesSubKey, StorageTrieEntry, StoredNibbles, StoredNibblesSubKey,
 };
 use std::time::Instant;
 use tracing::{debug, info};
@@ -92,16 +92,65 @@ macro_rules! define_dup_cursor_iter {
     };
 }
 
-// Generate iterators for all 4 table types
+// Generate iterators for hashed account/storage table types
 define_simple_cursor_iter!(HashedAccountsInit, tables::HashedAccounts, B256, Account);
 define_dup_cursor_iter!(HashedStoragesInit, tables::HashedStorages, B256, StorageEntry);
-define_simple_cursor_iter!(
-    AccountsTrieInit,
-    tables::PackedAccountsTrie,
-    PackedStoredNibbles,
-    BranchNodeCompact
-);
-define_dup_cursor_iter!(StoragesTrieInit, tables::StoragesTrie, B256, StorageTrieEntry);
+
+struct AccountsTrieInit<C>(C);
+
+impl<C> AccountsTrieInit<C> {
+    const fn new(cursor: C) -> Self {
+        Self(cursor)
+    }
+}
+
+impl<C: DbCursorRO<tables::PackedAccountsTrie>> Iterator for AccountsTrieInit<C> {
+    type Item = Result<(StoredNibbles, BranchNodeCompact), DatabaseError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.0
+            .next()
+            .transpose()
+            .map(|res| res.map(|(key, value)| (StoredNibbles::from(key), value)))
+    }
+}
+
+struct StoragesTrieInit<C>(C);
+
+impl<C> StoragesTrieInit<C> {
+    const fn new(cursor: C) -> Self {
+        Self(cursor)
+    }
+}
+
+impl<C: DbDupCursorRO<tables::PackedStoragesTrie> + DbCursorRO<tables::PackedStoragesTrie>> Iterator
+    for StoragesTrieInit<C>
+{
+    type Item = Result<(B256, StorageTrieEntry), DatabaseError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if let Some(res) = self.0.next_dup().transpose() {
+            return Some(res.map(storage_trie_entry_from_packed));
+        }
+
+        match self.0.next_no_dup() {
+            Ok(Some((next_key, _))) => {
+                self.0.seek(next_key).transpose().map(|res| res.map(storage_trie_entry_from_packed))
+            }
+            Ok(None) => None,
+            Err(e) => Some(Err(e)),
+        }
+    }
+}
+
+fn storage_trie_entry_from_packed(
+    (hashed_address, entry): (B256, PackedStorageTrieEntry),
+) -> (B256, StorageTrieEntry) {
+    (
+        hashed_address,
+        StorageTrieEntry { nibbles: StoredNibblesSubKey::from(entry.nibbles), node: entry.node },
+    )
+}
 
 /// Trait to estimate the progress of a initialization job based on the key.
 trait CompletionEstimatable {
@@ -121,7 +170,7 @@ impl CompletionEstimatable for B256 {
     }
 }
 
-impl CompletionEstimatable for PackedStoredNibbles {
+impl CompletionEstimatable for StoredNibbles {
     fn estimate_progress(&self) -> f64 {
         // use the first 6 nibbles as a progress estimate
         let progress_nibbles =
@@ -270,7 +319,7 @@ impl<Tx: DbTx + Sync, S: OpProofsStore + OpProofsInitialStateStore + Send>
         let mut start_cursor = self.tx.cursor_read::<tables::PackedAccountsTrie>()?;
 
         if let Some(latest_key) = start_key {
-            let packed_key = PackedStoredNibbles::from(latest_key);
+            let packed_key = PackedStoredNibbles::from(latest_key.clone());
             start_cursor
                 .seek(packed_key.clone())?
                 .filter(|(k, _)| *k == packed_key)
@@ -293,15 +342,15 @@ impl<Tx: DbTx + Sync, S: OpProofsStore + OpProofsInitialStateStore + Send>
         &self,
         start_key: Option<StorageTrieKey>,
     ) -> Result<(), OpProofsStorageError> {
-        let mut start_cursor = self.tx.cursor_dup_read::<tables::StoragesTrie>()?;
+        let mut start_cursor = self.tx.cursor_dup_read::<tables::PackedStoragesTrie>()?;
 
         if let Some(latest_key) = start_key {
+            let packed_subkey = PackedStoredNibblesSubKey::from(StoredNibblesSubKey::from(
+                latest_key.path.0.clone(),
+            ));
             start_cursor
-                .seek_by_key_subkey(
-                    latest_key.hashed_address,
-                    StoredNibblesSubKey::from(latest_key.path.0),
-                )?
-                .filter(|v| v.nibbles.0 == latest_key.path.0)
+                .seek_by_key_subkey(latest_key.hashed_address, packed_subkey)?
+                .filter(|v| StoredNibblesSubKey::from(v.nibbles.clone()).0 == latest_key.path.0)
                 .ok_or(OpProofsStorageError::InitializeStorageInconsistentState)?;
         }
 
@@ -442,7 +491,7 @@ impl<C> InitTable for HashedStoragesInit<C> {
 }
 
 impl<C> InitTable for AccountsTrieInit<C> {
-    type Key = PackedStoredNibbles;
+    type Key = StoredNibbles;
     type Value = BranchNodeCompact;
 
     /// Save mapping of account trie paths to branch nodes to storage.

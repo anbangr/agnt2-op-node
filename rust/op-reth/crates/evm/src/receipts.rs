@@ -32,7 +32,7 @@ impl OpReceiptBuilder for OpRethReceiptBuilder {
 
                 Ok(match ty {
                     OpTxType::Legacy => OpReceipt::Legacy(receipt),
-                    OpTxType::Eip1559 => OpReceipt::Eip1559(receipt),
+                    OpTxType::Eip1559 | OpTxType::PostExec => OpReceipt::Eip1559(receipt),
                     OpTxType::Eip2930 => OpReceipt::Eip2930(receipt),
                     OpTxType::Eip7702 => OpReceipt::Eip7702(receipt),
                     OpTxType::Deposit => unreachable!(),
