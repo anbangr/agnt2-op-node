@@ -265,6 +265,7 @@ func migrateSuperRoots(
 			Root:             common.Hash(superRoot),
 			L2SequenceNumber: big.NewInt(int64(superrootTime)),
 		},
+		// TODO(#20030): Switch to superCannonKonaGameType once SUPER_CANNON is disabled in migrator
 		StartingRespectedGameType: superCannonGameType,
 	}
 	migrateCall := contract.Call("migrate", migrateInputV2)
