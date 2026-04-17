@@ -471,7 +471,17 @@ where
         context: &mut CTX,
         inputs: &mut CallInputs,
     ) -> Option<revm::interpreter::CallOutcome> {
-        self.inner.call(context, inputs).or_else(|| self.post_exec.call(context, inputs))
+        // Always run both inspectors: the warming inspector's first-touch observations drive
+        // block-scoped refund attribution and must not be gated on whether the user inspector
+        // short-circuits the frame. The warming inspector is expected to never synthesize an
+        // outcome, so inner's return value is authoritative.
+        let inner = self.inner.call(context, inputs);
+        let post_exec = self.post_exec.call(context, inputs);
+        debug_assert!(
+            post_exec.is_none(),
+            "SDMWarmingInspector must not synthesize a call outcome",
+        );
+        inner
     }
 
     fn call_end(
@@ -489,7 +499,14 @@ where
         context: &mut CTX,
         inputs: &mut CreateInputs,
     ) -> Option<revm::interpreter::CreateOutcome> {
-        self.inner.create(context, inputs).or_else(|| self.post_exec.create(context, inputs))
+        // See `call` above: always observe; inner's outcome wins.
+        let inner = self.inner.create(context, inputs);
+        let post_exec = self.post_exec.create(context, inputs);
+        debug_assert!(
+            post_exec.is_none(),
+            "SDMWarmingInspector must not synthesize a create outcome",
+        );
+        inner
     }
 
     fn create_end(
