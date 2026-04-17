@@ -5,11 +5,19 @@
 //! - components: network,pool,evm
 //! - engine: advances the node
 //!
-//! The upstream OP payload builder is currently specialized for standard
-//! `OpTransactionSigned` payloads. This example still demonstrates a fully custom
-//! node type with custom primitives, executor, engine API, validator, and RPC,
-//! while wiring a no-op payload service until a dedicated payload builder for the
-//! custom transaction type is added.
+//! # Breaking change: payload service
+//!
+//! Upstream `OpPayloadBuilder` is now specialized for `OpTransactionSigned` payloads so that
+//! it can append the post-exec (type `0x7D`) transaction added by the SDM feature. As a result,
+//! this example no longer composes `OpPayloadBuilder` with the custom transaction type used in
+//! `components/pool`. Until a dedicated payload builder for custom transaction types is added,
+//! the example wires a `NoopPayloadServiceBuilder` — the node will not produce blocks, but it
+//! still demonstrates the rest of the custom-node surface (custom primitives, executor, engine
+//! API, engine validator, and RPC).
+//!
+//! Downstream forks that previously used `OpPayloadBuilder` with their own `_TX` type will need
+//! to either constrain `_TX = OpTransactionSigned` or copy `OpPayloadBuilder` and re-implement
+//! the post-exec append path for their transaction type.
 
 #![cfg_attr(not(test), warn(unused_crate_dependencies))]
 

@@ -31,10 +31,19 @@ use std::{fmt::Debug, sync::Arc};
 use tokio::sync::{Semaphore, oneshot};
 
 /// An extension to the `debug_` namespace for post-exec replay.
+///
+/// This trait is registered under the `debug` namespace and is intended for operator and
+/// research tooling only. Do not expose the `debug` namespace on public RPC endpoints: each
+/// call replays an entire historical block against live state and is unbounded in cost, so
+/// an unauthenticated caller can trivially saturate the node.
 #[cfg_attr(not(test), rpc(server, namespace = "debug"))]
 #[cfg_attr(test, rpc(server, client, namespace = "debug"))]
 pub trait OpDebugPostExecApi {
     /// Counterfactually replay a historical block with post-exec enabled.
+    ///
+    /// Replays one block per call; callers driving a block range are responsible for
+    /// their own pacing and cancellation. Requires historical state for the target block
+    /// (full/archive node); on a pruned node this will fail at state lookup.
     #[method(name = "replaySDMBlock")]
     async fn replay_post_exec_block(
         &self,

@@ -87,6 +87,9 @@ func ReplayRange(ctx context.Context, src Source, cfg Config) (*RangeResult, err
 	var totalRefundRatio float64
 
 	for blockNum := cfg.FromBlock; blockNum <= cfg.ToBlock; blockNum++ {
+		if err := ctx.Err(); err != nil {
+			return result, err
+		}
 		blockResult, err := replayBlock(ctx, src, blockNum, cfg)
 		if err != nil {
 			return nil, err

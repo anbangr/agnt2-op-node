@@ -59,17 +59,28 @@ impl PostExecPayload {
         buf.into()
     }
 
-    /// Decode a payload from RLP bytes.
+    /// Decode a payload from an RLP stream, validating the payload version.
     ///
-    /// Rejects payloads whose `version` is not [`POST_EXEC_PAYLOAD_VERSION`].
-    pub fn from_rlp_bytes(data: &[u8]) -> alloy_rlp::Result<Self> {
-        let mut buf = data;
-        let payload = Self::decode(&mut buf)?;
-        if !buf.is_empty() {
-            return Err(alloy_rlp::Error::UnexpectedLength);
-        }
+    /// Advances `buf` past the consumed bytes. Unlike [`Self::from_rlp_bytes`], trailing bytes
+    /// are left in place for the caller to consume; this is the decoder to use on the EIP-2718
+    /// path where the envelope already framed the packet exactly.
+    pub fn decode_checked(buf: &mut &[u8]) -> alloy_rlp::Result<Self> {
+        let payload = Self::decode(buf)?;
         if payload.version != POST_EXEC_PAYLOAD_VERSION {
             return Err(alloy_rlp::Error::Custom("unsupported post-exec payload version"));
+        }
+        Ok(payload)
+    }
+
+    /// Decode a payload from RLP bytes.
+    ///
+    /// Rejects payloads whose `version` is not [`POST_EXEC_PAYLOAD_VERSION`] and rejects any
+    /// trailing bytes after the RLP structure.
+    pub fn from_rlp_bytes(data: &[u8]) -> alloy_rlp::Result<Self> {
+        let mut buf = data;
+        let payload = Self::decode_checked(&mut buf)?;
+        if !buf.is_empty() {
+            return Err(alloy_rlp::Error::UnexpectedLength);
         }
         Ok(payload)
     }
@@ -262,11 +273,11 @@ impl Decodable2718 for TxPostExec {
         if ty != POST_EXEC_TX_TYPE_ID {
             return Err(Eip2718Error::UnexpectedType(ty));
         }
-        Ok(Self::new(PostExecPayload::decode(data)?))
+        Ok(Self::new(PostExecPayload::decode_checked(data)?))
     }
 
     fn fallback_decode(data: &mut &[u8]) -> Eip2718Result<Self> {
-        Ok(Self::new(PostExecPayload::decode(data)?))
+        Ok(Self::new(PostExecPayload::decode_checked(data)?))
     }
 }
 
@@ -282,7 +293,7 @@ impl Encodable for TxPostExec {
 
 impl Decodable for TxPostExec {
     fn decode(data: &mut &[u8]) -> alloy_rlp::Result<Self> {
-        Ok(Self::new(PostExecPayload::decode(data)?))
+        Ok(Self::new(PostExecPayload::decode_checked(data)?))
     }
 }
 
@@ -424,6 +435,46 @@ mod tests {
         let decoded = TxPostExec::decode_2718(&mut buf.as_slice()).expect("decode 2718");
         assert_eq!(decoded, tx);
         assert_eq!(decoded.tx_hash(), tx.tx_hash());
+    }
+
+    #[test]
+    fn post_exec_tx_eip2718_decode_rejects_unknown_version() {
+        let payload = PostExecPayload {
+            version: POST_EXEC_PAYLOAD_VERSION + 1,
+            block_number: 42,
+            gas_refund_entries: vec![SDMGasEntry { index: 3, gas_refund: 7 }],
+        };
+
+        let mut buf = Vec::new();
+        buf.put_u8(POST_EXEC_TX_TYPE_ID);
+        payload.encode(&mut buf);
+
+        let err = TxPostExec::decode_2718(&mut buf.as_slice())
+            .expect_err("2718 decode must reject unknown version");
+        assert!(
+            matches!(
+                err,
+                Eip2718Error::RlpError(alloy_rlp::Error::Custom(
+                    "unsupported post-exec payload version"
+                ))
+            ),
+            "unexpected error: {err:?}"
+        );
+    }
+
+    #[test]
+    fn post_exec_tx_rlp_decode_rejects_unknown_version() {
+        let payload = PostExecPayload {
+            version: POST_EXEC_PAYLOAD_VERSION + 1,
+            block_number: 42,
+            gas_refund_entries: vec![SDMGasEntry { index: 3, gas_refund: 7 }],
+        };
+        let mut buf = Vec::new();
+        payload.encode(&mut buf);
+
+        let err = TxPostExec::decode(&mut buf.as_slice())
+            .expect_err("rlp decode must reject unknown version");
+        assert_eq!(err, alloy_rlp::Error::Custom("unsupported post-exec payload version"));
     }
 
     #[test]
