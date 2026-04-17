@@ -5740,6 +5740,8 @@ dependencies = [
  "op-alloy-consensus",
  "op-revm",
  "revm",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
