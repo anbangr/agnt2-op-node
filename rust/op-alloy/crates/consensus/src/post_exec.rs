@@ -1,6 +1,8 @@
 //! Post-execution transaction types.
 
 use alloc::vec::Vec;
+#[cfg(feature = "serde")]
+use alloy_consensus::Sealed;
 use alloy_consensus::{Sealable, Transaction, Typed2718, transaction::RlpEcdsaEncodableTx};
 use alloy_eips::{
     eip2718::{Decodable2718, Eip2718Error, Eip2718Result, Encodable2718, IsTyped2718},
@@ -11,6 +13,9 @@ use alloy_rlp::{BufMut, Decodable, Encodable, Header, RlpDecodable, RlpEncodable
 
 /// Type byte for the post-execution transaction.
 pub const POST_EXEC_TX_TYPE_ID: u8 = 0x7D;
+
+/// Current format version for [`PostExecPayload`].
+pub const POST_EXEC_PAYLOAD_VERSION: u64 = 1;
 
 /// Per-transaction gas refund entry within a [`PostExecPayload`].
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Default, RlpEncodable, RlpDecodable)]
@@ -55,11 +60,16 @@ impl PostExecPayload {
     }
 
     /// Decode a payload from RLP bytes.
+    ///
+    /// Rejects payloads whose `version` is not [`POST_EXEC_PAYLOAD_VERSION`].
     pub fn from_rlp_bytes(data: &[u8]) -> alloy_rlp::Result<Self> {
         let mut buf = data;
         let payload = Self::decode(&mut buf)?;
         if !buf.is_empty() {
             return Err(alloy_rlp::Error::UnexpectedLength);
+        }
+        if payload.version != POST_EXEC_PAYLOAD_VERSION {
+            return Err(alloy_rlp::Error::Custom("unsupported post-exec payload version"));
         }
         Ok(payload)
     }
@@ -299,7 +309,47 @@ impl From<TxPostExec> for alloy_rpc_types_eth::TransactionRequest {
 
 /// Build a post-execution transaction from a block number and refund entries.
 pub fn build_post_exec_tx(block_number: u64, gas_refund_entries: Vec<SDMGasEntry>) -> TxPostExec {
-    TxPostExec::new(PostExecPayload { version: 1, block_number, gas_refund_entries })
+    TxPostExec::new(PostExecPayload {
+        version: POST_EXEC_PAYLOAD_VERSION,
+        block_number,
+        gas_refund_entries,
+    })
+}
+
+/// Post-exec transactions serialize as full RPC transaction objects when embedded in a
+/// [`crate::OpTxEnvelope`] response.
+///
+/// Unlike the standalone [`TxPostExec`] serde form, RPC consumers such as op-node expect the
+/// canonical `input` field to be present so the transaction can be decoded by go-ethereum types.
+#[cfg(feature = "serde")]
+pub fn serde_post_exec_tx_rpc<S>(
+    value: &Sealed<TxPostExec>,
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    use serde::Serialize;
+
+    #[derive(Serialize)]
+    struct SerdeHelper<'a> {
+        hash: B256,
+        #[serde(rename = "type", with = "alloy_serde::quantity")]
+        tx_type: u8,
+        #[serde(with = "alloy_serde::quantity")]
+        gas: u64,
+        value: U256,
+        input: &'a Bytes,
+    }
+
+    SerdeHelper {
+        hash: value.seal(),
+        tx_type: POST_EXEC_TX_TYPE_ID,
+        gas: 0,
+        value: U256::ZERO,
+        input: &value.inner().input,
+    }
+    .serialize(serializer)
 }
 
 #[cfg(test)]
@@ -318,6 +368,20 @@ mod tests {
         let decoded = PostExecPayload::from_rlp_bytes(encoded.as_ref()).expect("decode payload");
 
         assert_eq!(decoded, payload);
+    }
+
+    #[test]
+    fn post_exec_payload_rlp_decode_rejects_unknown_version() {
+        let payload = PostExecPayload {
+            version: POST_EXEC_PAYLOAD_VERSION + 1,
+            block_number: 42,
+            gas_refund_entries: vec![SDMGasEntry { index: 3, gas_refund: 7 }],
+        };
+
+        let encoded = payload.to_rlp_bytes();
+        let err =
+            PostExecPayload::from_rlp_bytes(encoded.as_ref()).expect_err("reject unknown version");
+        assert_eq!(err, alloy_rlp::Error::Custom("unsupported post-exec payload version"));
     }
 
     #[test]
