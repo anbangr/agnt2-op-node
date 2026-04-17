@@ -3,11 +3,12 @@ use crate::{
     OpAttributes, OpPayloadBuilderAttributes, OpPayloadPrimitives, config::OpBuilderConfig,
     error::OpPayloadBuilderError, payload::OpBuiltPayload,
 };
-use alloy_consensus::{BlockHeader, Transaction, Typed2718};
+use alloy_consensus::{BlockHeader, Sealable, Transaction, Typed2718, transaction::Recovered};
 use alloy_evm::Evm as AlloyEvm;
-use alloy_primitives::{B256, U256};
+use alloy_primitives::{Address, B256, U256};
 use alloy_rpc_types_debug::ExecutionWitness;
 use alloy_rpc_types_engine::PayloadId;
+use op_alloy_consensus::{SDMGasEntry, build_post_exec_tx};
 use op_revm::{L1BlockInfo, constants::L1_BLOCK_CONTRACT};
 use reth_basic_payload_builder::*;
 use reth_chainspec::{ChainSpecProvider, EthChainSpec};
@@ -19,8 +20,11 @@ use reth_evm::{
     },
 };
 use reth_execution_types::BlockExecutionOutput;
+use reth_optimism_evm::{ConfigurePostExecEvm, PostExecExecutorExt, PostExecMode};
 use reth_optimism_forks::OpHardforks;
-use reth_optimism_primitives::{L2_TO_L1_MESSAGE_PASSER_ADDRESS, transaction::OpTransaction};
+use reth_optimism_primitives::{
+    L2_TO_L1_MESSAGE_PASSER_ADDRESS, OpTransactionSigned, transaction::OpTransaction,
+};
 use reth_optimism_txpool::{
     OpPooledTx,
     estimated_da_size::DataAvailabilitySized,
@@ -41,6 +45,15 @@ use reth_transaction_pool::{BestTransactionsAttributes, PoolTransaction, Transac
 use revm::context::{Block, BlockEnv};
 use std::{marker::PhantomData, sync::Arc};
 use tracing::{debug, trace, warn};
+
+fn build_post_exec_recovered_tx(
+    block_number: u64,
+    entries: Vec<SDMGasEntry>,
+) -> Recovered<OpTransactionSigned> {
+    let post_exec_tx = build_post_exec_tx(block_number, entries);
+    let post_exec_signed = OpTransactionSigned::PostExec(post_exec_tx.seal_slow());
+    Recovered::new_unchecked(post_exec_signed, Address::ZERO)
+}
 
 /// Optimism's payload builder
 #[derive(Debug)]
@@ -155,8 +168,8 @@ impl<Pool, Client, Evm, N, T, Attrs> OpPayloadBuilder<Pool, Client, Evm, T, Attr
 where
     Pool: TransactionPool<Transaction: OpPooledTx<Consensus = N::SignedTx>>,
     Client: StateProviderFactory + ChainSpecProvider<ChainSpec: OpHardforks>,
-    N: OpPayloadPrimitives,
-    Evm: ConfigureEvm<
+    N: OpPayloadPrimitives<_TX = OpTransactionSigned>,
+    Evm: ConfigurePostExecEvm<
             Primitives = N,
             NextBlockEnvCtx: BuildNextEnv<Attrs, N::BlockHeader, Client::ChainSpec>,
         >,
@@ -237,10 +250,10 @@ where
 impl<Pool, Client, Evm, N, Txs> PayloadBuilder
     for OpPayloadBuilder<Pool, Client, Evm, Txs, OpPayloadBuilderAttributes<N::SignedTx>>
 where
-    N: OpPayloadPrimitives,
+    N: OpPayloadPrimitives<_TX = OpTransactionSigned>,
     Client: StateProviderFactory + ChainSpecProvider<ChainSpec: OpHardforks> + Clone,
     Pool: TransactionPool<Transaction: OpPooledTx<Consensus = N::SignedTx>>,
-    Evm: ConfigureEvm<
+    Evm: ConfigurePostExecEvm<
             Primitives = N,
             NextBlockEnvCtx: BuildNextEnv<
                 OpPayloadBuilderAttributes<N::SignedTx>,
@@ -363,12 +376,12 @@ impl<Txs> OpBuilder<'_, Txs> {
         ctx: OpPayloadBuilderCtx<Evm, ChainSpec, Attrs>,
     ) -> Result<BuildOutcomeKind<OpBuiltPayload<N>>, PayloadBuilderError>
     where
-        Evm: ConfigureEvm<
+        Evm: ConfigurePostExecEvm<
                 Primitives = N,
                 NextBlockEnvCtx: BuildNextEnv<Attrs, N::BlockHeader, ChainSpec>,
             >,
         ChainSpec: EthChainSpec + OpHardforks,
-        N: OpPayloadPrimitives,
+        N: OpPayloadPrimitives<_TX = OpTransactionSigned>,
         Txs:
             PayloadTransactions<Transaction: PoolTransaction<Consensus = N::SignedTx> + OpPooledTx>,
         Attrs: OpAttributes<Transaction = N::SignedTx>,
@@ -405,6 +418,25 @@ impl<Txs> OpBuilder<'_, Txs> {
             if !ctx.is_better_payload(info.total_fees) {
                 // can skip building the block
                 return Ok(BuildOutcomeKind::Aborted { fees: info.total_fees });
+            }
+        }
+
+        if ctx.builder_config.sdm_enabled {
+            let entries = builder.executor_mut().take_post_exec_entries();
+            if !entries.is_empty() {
+                let post_exec_recovered: Recovered<N::SignedTx> = build_post_exec_recovered_tx(
+                    builder.evm_mut().block().number().saturating_to(),
+                    entries,
+                );
+
+                // A verifier replaying this block will expect the post-exec tx to match the
+                // refunds it observes, so dropping it on execution failure would produce a
+                // payload that no honest verifier can reproduce.
+                builder.execute_transaction(post_exec_recovered).map_err(|err| {
+                    warn!(target: "payload_builder", %err, "post-exec tx execution failed, aborting payload");
+                    PayloadBuilderError::EvmExecutionError(Box::new(err))
+                })?;
+                debug!(target: "payload_builder", "post-exec tx included in block");
             }
         }
 
@@ -448,12 +480,12 @@ impl<Txs> OpBuilder<'_, Txs> {
         ctx: &OpPayloadBuilderCtx<Evm, ChainSpec, Attrs>,
     ) -> Result<ExecutionWitness, PayloadBuilderError>
     where
-        Evm: ConfigureEvm<
+        Evm: ConfigurePostExecEvm<
                 Primitives = N,
                 NextBlockEnvCtx: BuildNextEnv<Attrs, N::BlockHeader, ChainSpec>,
             >,
         ChainSpec: EthChainSpec + OpHardforks,
-        N: OpPayloadPrimitives,
+        N: OpPayloadPrimitives<_TX = OpTransactionSigned>,
         Txs: PayloadTransactions<Transaction: PoolTransaction<Consensus = N::SignedTx>>,
         Attrs: OpAttributes<Transaction = N::SignedTx>,
     {
@@ -597,7 +629,7 @@ pub struct OpPayloadBuilderCtx<
 
 impl<Evm, ChainSpec, Attrs> OpPayloadBuilderCtx<Evm, ChainSpec, Attrs>
 where
-    Evm: ConfigureEvm<
+    Evm: ConfigurePostExecEvm<
             Primitives: OpPayloadPrimitives,
             NextBlockEnvCtx: BuildNextEnv<Attrs, HeaderTy<Evm::Primitives>, ChainSpec>,
         >,
@@ -639,12 +671,13 @@ where
     ) -> Result<
         impl BlockBuilder<
             Primitives = Evm::Primitives,
-            Executor: BlockExecutorFor<'a, Evm::BlockExecutorFactory, &'a mut State<DB>>,
+            Executor: BlockExecutorFor<'a, Evm::BlockExecutorFactory, &'a mut State<DB>>
+                          + PostExecExecutorExt,
         > + 'a,
         PayloadBuilderError,
     > {
         self.evm_config
-            .builder_for_next_block(
+            .post_exec_builder_for_next_block(
                 db,
                 self.parent(),
                 Evm::NextBlockEnvCtx::build_next_env(
@@ -653,6 +686,11 @@ where
                     self.chain_spec.as_ref(),
                 )
                 .map_err(PayloadBuilderError::other)?,
+                if self.builder_config.sdm_enabled {
+                    PostExecMode::Produce
+                } else {
+                    PostExecMode::Disabled
+                },
             )
             .map_err(PayloadBuilderError::other)
     }
@@ -811,5 +849,35 @@ where
         }
 
         Ok(None)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::build_post_exec_recovered_tx;
+    use alloy_consensus::Typed2718;
+    use alloy_evm::RecoveredTx;
+    use alloy_primitives::Address;
+    use op_alloy_consensus::SDMGasEntry;
+    use reth_optimism_primitives::OpTransactionSigned;
+
+    #[test]
+    fn build_post_exec_recovered_tx_wraps_entries_in_post_exec_tx() {
+        let entries = vec![
+            SDMGasEntry { index: 3, gas_refund: 17 },
+            SDMGasEntry { index: 5, gas_refund: 23 },
+        ];
+
+        let block_number = 42;
+        let recovered = build_post_exec_recovered_tx(block_number, entries.clone());
+
+        assert_eq!(recovered.signer(), Address::ZERO);
+        assert_eq!(recovered.tx().ty(), op_alloy_consensus::POST_EXEC_TX_TYPE_ID);
+
+        let OpTransactionSigned::PostExec(tx) = recovered.into_inner() else {
+            panic!("expected synthetic post-exec transaction");
+        };
+        assert_eq!(tx.inner().payload.block_number, block_number);
+        assert_eq!(tx.inner().payload.gas_refund_entries, entries);
     }
 }
