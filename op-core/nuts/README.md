@@ -26,6 +26,8 @@ just nut-snapshot-for <fork>
 
 This copies `current-upgrade-bundle.json` to `op-core/nuts/bundles/<fork>_nut_bundle.json` and updates `fork_lock.toml` with the sha256 hash and the merge-base commit with `origin/develop`.
 
+A byte-identical copy is also written to `rust/kona/crates/protocol/hardforks/bundles/<fork>_nut_bundle.json`. The kona-hardforks crate's `build.rs` reads from that in-crate copy because the Docker build context for kona images is scoped to `rust/` and cannot see `op-core/`. `check-nut-locks` verifies the two copies stay byte-identical.
+
 **Important:** The recorded commit is the merge-base with develop, not HEAD. This ensures the commit survives squash-merge. Contract changes must be merged to develop in a separate PR *before* snapshotting the bundle.
 
 
