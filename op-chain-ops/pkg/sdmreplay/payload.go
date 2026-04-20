@@ -8,6 +8,12 @@ import (
 
 const SDMTxType = 0x7d
 
+// PostExecPayloadVersion is the only PostExecPayload version the Go decoder accepts.
+// Must stay in lock-step with POST_EXEC_PAYLOAD_VERSION in rust/op-alloy, which rejects
+// unknown versions at decode time; Go accepting what Rust rejects is a cross-language
+// drift hazard on any replay/verifier pipeline sitting between the two.
+const PostExecPayloadVersion uint64 = 1
+
 // SDMGasEntry is one per-transaction refund entry inside the SDM portion of a post-exec payload.
 type SDMGasEntry struct {
 	Index     uint64 `json:"index"`
@@ -42,6 +48,23 @@ func DecodePayload(input []byte) (*PostExecPayload, error) {
 		return nil, fmt.Errorf("empty post-exec payload")
 	}
 
+	payload, err := decodePayloadStruct(input)
+	if err != nil {
+		return nil, err
+	}
+	if payload.Version != PostExecPayloadVersion {
+		return nil, fmt.Errorf(
+			"unsupported post-exec payload version %d (expected %d)",
+			payload.Version, PostExecPayloadVersion,
+		)
+	}
+	return payload, nil
+}
+
+// decodePayloadStruct tries the current RLP shape first, then falls back to the legacy
+// two-field shape. Version validation is applied by the caller so unknown versions are
+// rejected on either path.
+func decodePayloadStruct(input []byte) (*PostExecPayload, error) {
 	var payload PostExecPayload
 	if err := rlp.DecodeBytes(input, &payload); err == nil {
 		return &payload, nil
