@@ -43,6 +43,21 @@ use crate::post_exec::{PostExecExecutedTx, PostExecTxContext, PostExecTxKind, Wa
 mod canyon;
 pub mod receipt_builder;
 
+/// Default no-op hook installed by [`OpBlockExecutor::new`] for Produce-mode tracking.
+///
+/// Kept as a named fn item (not a closure) so [`apply_pre_execution_changes`] can identity-
+/// compare the installed hook against this default via [`core::ptr::fn_addr_eq`] and
+/// `debug_assert!` that callers wired the real inspector before driving execution in
+/// `PostExecMode::Produce`.
+fn default_begin_post_exec_tx<E: Evm>(_: &mut E, _: PostExecTxContext) {}
+
+/// Default no-op hook installed by [`OpBlockExecutor::new`] for Produce-mode result take.
+///
+/// See [`default_begin_post_exec_tx`] — paired with it for the same identity-compare.
+fn default_take_last_post_exec_tx_result<E: Evm>(_: &mut E) -> PostExecExecutedTx {
+    PostExecExecutedTx::default()
+}
+
 /// Trait for OP transaction environments. Allows to recover the transaction encoded bytes if
 /// they're available.
 pub trait OpTxEnv {
@@ -201,8 +216,8 @@ where
             post_exec_mode,
             post_exec_verify_entries,
             post_exec_invalid_reason,
-            begin_post_exec_tx: |_, _| {},
-            take_last_post_exec_tx_result: |_| PostExecExecutedTx::default(),
+            begin_post_exec_tx: default_begin_post_exec_tx::<E>,
+            take_last_post_exec_tx_result: default_take_last_post_exec_tx_result::<E>,
             warming_events_by_tx: Vec::new(),
         }
     }
@@ -583,6 +598,30 @@ where
                 );
                 return Err(self.invalid_post_exec_payload(reason));
             }
+        }
+
+        // Produce mode drives refund accounting through the begin/take hooks; if a caller
+        // forgets to wire them the executor silently drops all refunds, which would diverge
+        // this node from any peer that *did* wire them. OpEvm auto-wires in-tree (see
+        // `ConfigurePostExecEvm` in lib.rs); this guard catches downstream forks that
+        // bypass the builder.
+        if matches!(self.post_exec_mode, PostExecMode::Produce) {
+            debug_assert!(
+                !core::ptr::fn_addr_eq(
+                    self.begin_post_exec_tx,
+                    default_begin_post_exec_tx::<E> as fn(&mut E, PostExecTxContext),
+                ),
+                "PostExecMode::Produce requires begin_post_exec_tx to be wired via \
+                 with_post_exec_begin; the default no-op would silently drop refunds",
+            );
+            debug_assert!(
+                !core::ptr::fn_addr_eq(
+                    self.take_last_post_exec_tx_result,
+                    default_take_last_post_exec_tx_result::<E> as fn(&mut E) -> PostExecExecutedTx,
+                ),
+                "PostExecMode::Produce requires take_last_post_exec_tx_result to be wired \
+                 via with_post_exec_result; the default no-op would silently drop refunds",
+            );
         }
 
         self.system_caller.apply_blockhashes_contract_call(self.ctx.parent_hash, &mut self.evm)?;
@@ -1341,6 +1380,37 @@ mod tests {
             }
             _ => panic!("expected invalid post-exec payload error"),
         }
+    }
+
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "PostExecMode::Produce requires begin_post_exec_tx")]
+    fn test_produce_mode_without_wired_hooks_debug_asserts() {
+        const DA_FOOTPRINT_GAS_SCALAR: u16 = 7;
+        const GAS_LIMIT: u64 = 100_000;
+        const JOVIAN_TIMESTAMP: u64 = 1746806402;
+
+        let mut db = prepare_jovian_db(DA_FOOTPRINT_GAS_SCALAR);
+        let op_chain_hardforks = OpChainHardforks::new(
+            OpHardfork::op_mainnet()
+                .into_iter()
+                .chain(vec![(OpHardfork::Jovian, ForkCondition::Timestamp(JOVIAN_TIMESTAMP))]),
+        );
+        let receipt_builder = OpAlloyReceiptBuilder::default();
+        // build_executor does not call with_post_exec_begin / with_post_exec_result, so
+        // the fn-pointer fields stay pinned to the default_* no-ops.
+        let mut executor = build_executor(
+            &mut db,
+            &receipt_builder,
+            &op_chain_hardforks,
+            GAS_LIMIT,
+            JOVIAN_TIMESTAMP,
+        );
+        executor.set_post_exec_mode(PostExecMode::Produce);
+
+        // Release builds skip the assert and would silently drop refunds — document that
+        // too so anyone removing the assert sees the expected behavior.
+        let _ = executor.apply_pre_execution_changes();
     }
 
     #[test]
