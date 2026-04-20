@@ -45,17 +45,17 @@ pub mod receipt_builder;
 
 /// Default no-op hook installed by [`OpBlockExecutor::new`] for Produce-mode tracking.
 ///
-/// Kept as a named fn item (not a closure) so [`apply_pre_execution_changes`] can identity-
+/// Kept as a named fn item (not a closure) so `apply_pre_execution_changes` can identity-
 /// compare the installed hook against this default via [`core::ptr::fn_addr_eq`] and
 /// `debug_assert!` that callers wired the real inspector before driving execution in
 /// `PostExecMode::Produce`.
-fn default_begin_post_exec_tx<E: Evm>(_: &mut E, _: PostExecTxContext) {}
+const fn default_begin_post_exec_tx<E: Evm>(_: &mut E, _: PostExecTxContext) {}
 
 /// Default no-op hook installed by [`OpBlockExecutor::new`] for Produce-mode result take.
 ///
 /// See [`default_begin_post_exec_tx`] — paired with it for the same identity-compare.
-fn default_take_last_post_exec_tx_result<E: Evm>(_: &mut E) -> PostExecExecutedTx {
-    PostExecExecutedTx::default()
+const fn default_take_last_post_exec_tx_result<E: Evm>(_: &mut E) -> PostExecExecutedTx {
+    PostExecExecutedTx { refund_total: 0, refund_events: Vec::new() }
 }
 
 /// Trait for OP transaction environments. Allows to recover the transaction encoded bytes if
