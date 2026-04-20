@@ -805,7 +805,14 @@ where
         if matches!(self.post_exec_mode, PostExecMode::Verify(_)) && post_exec_refund > 0 {
             self.post_exec_verify_entries.remove(&tx_index);
         }
-        self.warming_events_by_tx.push(warming_events);
+        // Skip push for the synthetic 0x7D tx: its execute path returns early with an empty
+        // `warming_events`, and the replay consumer (`post-exec-replay::replay_block`) runs
+        // against the stripped block so this index is never addressed. Deposit pushes stay
+        // because replay relies on positional alignment between the stripped block's
+        // transactions and `warming_events_by_tx`.
+        if !is_post_exec {
+            self.warming_events_by_tx.push(warming_events);
+        }
 
         // Fetch the depositor account from the database for the deposit nonce.
         // Note that this *only* needs to be done post-regolith hardfork, as deposit nonces

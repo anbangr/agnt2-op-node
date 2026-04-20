@@ -226,9 +226,9 @@ impl SDMWarmingInspector {
     }
 
     fn observe_account_touch(&mut self, address: Address, allow_refund: bool) {
-        let Some(kind) = self.current_tx.kind() else {
+        if self.current_tx.kind().is_none() {
             return;
-        };
+        }
 
         if self.current_tx.touched_accounts.insert(address) &&
             allow_refund &&
@@ -249,10 +249,15 @@ impl SDMWarmingInspector {
             .entry(address)
             .or_insert(WarmProvenance { first_warmed_by_tx_index: self.current_tx.tx_index });
 
-        if !kind.claims_refunds() {
-            self.current_tx.refund_total = 0;
-            self.current_tx.refund_events.clear();
-        }
+        // Non-claiming tx kinds (Deposit, PostExec) never populate these fields because
+        // `emit_refund` above gates on `claims_refunds()`. Previously this function also
+        // cleared them on every call for those kinds; that was defense-in-depth that
+        // obscured the invariant — assert it instead so regressions surface in debug builds.
+        debug_assert!(
+            self.current_tx.kind().is_some_and(PostExecTxKind::claims_refunds) ||
+                (self.current_tx.refund_total == 0 && self.current_tx.refund_events.is_empty()),
+            "non-claiming tx kinds must not have emitted refunds — check emit_refund gating",
+        );
     }
 
     fn observe_slot_touch(&mut self, address: Address, slot: B256, is_sstore: bool) {
