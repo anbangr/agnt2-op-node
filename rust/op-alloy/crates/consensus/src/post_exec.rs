@@ -34,7 +34,6 @@ pub struct SDMGasEntry {
 /// Today this only carries the SDM gas refund data, but additional post-exec fields may
 /// be added in the future.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Default, RlpEncodable, RlpDecodable)]
-#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "serde", serde(rename_all = "camelCase"))]
 pub struct PostExecPayload {
@@ -44,6 +43,20 @@ pub struct PostExecPayload {
     pub block_number: u64,
     /// Initial SDM gas refund entries keyed by transaction index.
     pub gas_refund_entries: Vec<SDMGasEntry>,
+}
+
+// `version` is pinned rather than left arbitrary because `decode_checked` rejects any
+// non-`POST_EXEC_PAYLOAD_VERSION` value, which would break encode/decode roundtrip
+// property tests (and any downstream fuzzer using arbitrary-generated payloads).
+#[cfg(feature = "arbitrary")]
+impl<'a> arbitrary::Arbitrary<'a> for PostExecPayload {
+    fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
+        Ok(Self {
+            version: POST_EXEC_PAYLOAD_VERSION,
+            block_number: u64::arbitrary(u)?,
+            gas_refund_entries: <Vec<SDMGasEntry>>::arbitrary(u)?,
+        })
+    }
 }
 
 impl PostExecPayload {
