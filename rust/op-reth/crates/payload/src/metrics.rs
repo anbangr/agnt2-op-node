@@ -5,8 +5,8 @@
 //! - a histogram of the total refund gas carried by the 0x7D payload,
 //! - a histogram of how many refund entries the payload carried.
 //!
-//! See also [`reth-optimism-post-exec-replay::metrics`] for the follower-side
-//! mismatch counters that complement these producer-side signals.
+//! The follower-side counterpart lives in `reth-optimism-post-exec-replay::metrics`
+//! (not linked here because that crate is not a direct dependency).
 
 use metrics::{Counter, Histogram};
 use reth_metrics::Metrics;
