@@ -38,7 +38,7 @@ use revm::{
     state::{Account, AccountStatus, EvmState},
 };
 
-use crate::post_exec::{PostExecExecutedTx, PostExecTxContext, PostExecTxKind};
+use crate::post_exec::{PostExecExecutedTx, PostExecTxContext, PostExecTxKind, WarmingRefundEvent};
 
 mod canyon;
 pub mod receipt_builder;
@@ -55,7 +55,7 @@ const fn default_begin_post_exec_tx<E: Evm>(_: &mut E, _: PostExecTxContext) {}
 ///
 /// See [`default_begin_post_exec_tx`] — paired with it for the same identity-compare.
 const fn default_take_last_post_exec_tx_result<E: Evm>(_: &mut E) -> PostExecExecutedTx {
-    PostExecExecutedTx { refund_total: 0 }
+    PostExecExecutedTx { refund_total: 0, refund_events: Vec::new() }
 }
 
 /// Trait for OP transaction environments. Allows to recover the transaction encoded bytes if
@@ -112,6 +112,9 @@ pub struct PostExecAdjustment {
     pub base_fee_delta: U256,
     /// Operator fee recipient balance delta to debit.
     pub operator_fee_delta: U256,
+    /// Exact warming refund attribution events that produced `refund` (populated in Produce
+    /// mode; empty in Verify mode where the refund comes from the embedded payload).
+    pub warming_events: Vec<WarmingRefundEvent>,
 }
 
 /// The result of executing an OP transaction.
@@ -183,6 +186,8 @@ pub struct OpBlockExecutor<Evm, R: OpReceiptBuilder, Spec> {
     pub begin_post_exec_tx: fn(&mut Evm, PostExecTxContext),
     /// Extractor for the most recent transaction's exact warming result.
     pub take_last_post_exec_tx_result: fn(&mut Evm) -> PostExecExecutedTx,
+    /// Per-transaction exact warming refund attribution events aligned with receipts.
+    pub warming_events_by_tx: Vec<Vec<WarmingRefundEvent>>,
 }
 
 impl<E, R, Spec> OpBlockExecutor<E, R, Spec>
@@ -213,6 +218,7 @@ where
             post_exec_invalid_reason,
             begin_post_exec_tx: default_begin_post_exec_tx::<E>,
             take_last_post_exec_tx_result: default_take_last_post_exec_tx_result::<E>,
+            warming_events_by_tx: Vec::new(),
         }
     }
 
@@ -277,6 +283,11 @@ where
     /// Returns the entries and clears the internal state.
     pub fn take_post_exec_entries(&mut self) -> Vec<SDMGasEntry> {
         core::mem::take(&mut self.post_exec_entries)
+    }
+
+    /// Take the exact per-transaction warming refund attribution events aligned with receipts.
+    pub fn take_warming_events_by_tx(&mut self) -> Vec<Vec<WarmingRefundEvent>> {
+        core::mem::take(&mut self.warming_events_by_tx)
     }
 }
 
@@ -721,14 +732,17 @@ where
         })?;
 
         let raw_gas_used = result.result.gas_used();
-        let post_exec_refund = match &self.post_exec_mode {
+        let (post_exec_refund, warming_events) = match &self.post_exec_mode {
             PostExecMode::Produce => {
-                (self.take_last_post_exec_tx_result)(&mut self.evm).refund_total
+                let PostExecExecutedTx { refund_total, refund_events } =
+                    (self.take_last_post_exec_tx_result)(&mut self.evm);
+                (refund_total, refund_events)
             }
-            PostExecMode::Verify(_) => {
-                self.verifier_post_exec_refund_for_tx(tx_index, is_deposit, false, raw_gas_used)?
-            }
-            PostExecMode::Disabled | PostExecMode::Invalid => 0,
+            PostExecMode::Verify(_) => (
+                self.verifier_post_exec_refund_for_tx(tx_index, is_deposit, false, raw_gas_used)?,
+                Vec::new(),
+            ),
+            PostExecMode::Disabled | PostExecMode::Invalid => (0, Vec::new()),
         };
         let canonical_gas_used = raw_gas_used.saturating_sub(post_exec_refund);
         let (sender_refund, beneficiary_delta, base_fee_delta, operator_fee_delta) = self
@@ -740,13 +754,15 @@ where
                 false,
             )?;
 
-        let post_exec = (post_exec_refund > 0).then_some(PostExecAdjustment {
-            refund: post_exec_refund,
-            sender_refund,
-            beneficiary_delta,
-            base_fee_delta,
-            operator_fee_delta,
-        });
+        let post_exec =
+            (post_exec_refund > 0 || !warming_events.is_empty()).then_some(PostExecAdjustment {
+                refund: post_exec_refund,
+                sender_refund,
+                beneficiary_delta,
+                base_fee_delta,
+                operator_fee_delta,
+                warming_events,
+            });
 
         Ok(OpTxResult {
             inner: EthTxResult {
@@ -780,6 +796,7 @@ where
             beneficiary_delta,
             base_fee_delta,
             operator_fee_delta,
+            warming_events,
         } = post_exec.unwrap_or_default();
 
         if !is_deposit &&
@@ -792,6 +809,14 @@ where
         }
         if matches!(self.post_exec_mode, PostExecMode::Verify(_)) && post_exec_refund > 0 {
             self.post_exec_verify_entries.remove(&tx_index);
+        }
+        // Skip push for the synthetic 0x7D tx: its execute path returns early with an empty
+        // `warming_events`, and the replay consumer (`post-exec-replay::replay_block`) runs
+        // against the stripped block so this index is never addressed. Deposit pushes stay
+        // because replay relies on positional alignment between the stripped block's
+        // transactions and `warming_events_by_tx`.
+        if !is_post_exec {
+            self.warming_events_by_tx.push(warming_events);
         }
 
         // Fetch the depositor account from the database for the deposit nonce.

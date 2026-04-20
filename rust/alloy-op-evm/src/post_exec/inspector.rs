@@ -1,4 +1,8 @@
-use alloy_primitives::{Address, B256, map::HashSet};
+use alloc::vec::Vec;
+use alloy_primitives::{
+    Address, B256,
+    map::{HashMap, HashSet},
+};
 use revm::{
     Inspector,
     bytecode::opcode,
@@ -14,6 +18,34 @@ use revm::{
     },
     primitives::TxKind,
 };
+
+/// Exact refund categories for post-exec block-level warming.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WarmingRefundKind {
+    /// Warm account rebate (+2500).
+    WarmAccount,
+    /// Warm storage read rebate (+2000).
+    WarmSload,
+    /// Warm storage write rebate (+2100).
+    WarmSstore,
+}
+
+/// Exact refund attribution event emitted when a warming rebate is granted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WarmingRefundEvent {
+    /// Replay-local transaction index that claimed the rebate.
+    pub claiming_tx_index: u64,
+    /// Refund kind.
+    pub kind: WarmingRefundKind,
+    /// Rebate amount in gas.
+    pub amount: u64,
+    /// Account touched by the rebate.
+    pub address: Address,
+    /// Storage slot touched by the rebate, when applicable.
+    pub slot: Option<B256>,
+    /// Replay-local transaction index that first warmed this account or slot.
+    pub first_warmed_by_tx_index: u64,
+}
 
 /// Classification for the currently executing transaction.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -42,17 +74,26 @@ pub struct PostExecTxContext {
 }
 
 /// Extracted result for the most recently executed transaction.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PostExecExecutedTx {
     /// Total refund for the tx.
     pub refund_total: u64,
+    /// Exact attribution events for the tx.
+    pub refund_events: Vec<WarmingRefundEvent>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct WarmProvenance {
+    first_warmed_by_tx_index: u64,
 }
 
 #[derive(Debug, Clone, Default)]
 struct CurrentTxState {
+    tx_index: u64,
     kind: Option<PostExecTxKind>,
     initialized_top_level: bool,
     refund_total: u64,
+    refund_events: Vec<WarmingRefundEvent>,
     touched_accounts: HashSet<Address>,
     touched_slots: HashSet<(Address, B256)>,
     intrinsic_warm_accounts: HashSet<Address>,
@@ -61,9 +102,11 @@ struct CurrentTxState {
 
 impl CurrentTxState {
     fn begin(&mut self, ctx: PostExecTxContext) {
+        self.tx_index = ctx.tx_index;
         self.kind = Some(ctx.kind);
         self.initialized_top_level = false;
         self.refund_total = 0;
+        self.refund_events.clear();
         self.touched_accounts.clear();
         self.touched_slots.clear();
         self.intrinsic_warm_accounts.clear();
@@ -77,21 +120,39 @@ impl CurrentTxState {
     fn finish(&mut self) -> PostExecExecutedTx {
         self.kind = None;
         self.initialized_top_level = false;
-        PostExecExecutedTx { refund_total: core::mem::take(&mut self.refund_total) }
+        PostExecExecutedTx {
+            refund_total: core::mem::take(&mut self.refund_total),
+            refund_events: core::mem::take(&mut self.refund_events),
+        }
     }
 
-    fn add_refund(&mut self, amount: u64) {
+    fn emit_refund(
+        &mut self,
+        provenance: WarmProvenance,
+        kind: WarmingRefundKind,
+        amount: u64,
+        address: Address,
+        slot: Option<B256>,
+    ) {
         if self.kind.is_some_and(PostExecTxKind::claims_refunds) {
             self.refund_total = self.refund_total.saturating_add(amount);
+            self.refund_events.push(WarmingRefundEvent {
+                claiming_tx_index: self.tx_index,
+                kind,
+                amount,
+                address,
+                slot,
+                first_warmed_by_tx_index: provenance.first_warmed_by_tx_index,
+            });
         }
     }
 }
 
-/// Lightweight inspector that computes post-exec block-warming refunds.
+/// Lightweight inspector that computes post-exec block-warming refunds and provenance.
 #[derive(Debug, Clone, Default)]
 pub struct SDMWarmingInspector {
-    warmed_accounts: HashSet<Address>,
-    warmed_slots: HashSet<(Address, B256)>,
+    warmed_accounts: HashMap<Address, WarmProvenance>,
+    warmed_slots: HashMap<(Address, B256), WarmProvenance>,
     current_tx: CurrentTxState,
     last_tx: PostExecExecutedTx,
 }
@@ -110,7 +171,7 @@ impl SDMWarmingInspector {
     /// Finishes the current transaction and stores the extracted result.
     pub fn finish_tx(&mut self) -> PostExecExecutedTx {
         let last = self.current_tx.finish();
-        self.last_tx = last;
+        self.last_tx = last.clone();
         last
     }
 
@@ -171,13 +232,32 @@ impl SDMWarmingInspector {
 
         if self.current_tx.touched_accounts.insert(address) &&
             allow_refund &&
-            !self.current_tx.intrinsic_warm_accounts.contains(&address) &&
-            self.warmed_accounts.contains(&address)
+            !self.current_tx.intrinsic_warm_accounts.contains(&address)
         {
-            self.current_tx.add_refund(2500);
+            if let Some(provenance) = self.warmed_accounts.get(&address).copied() {
+                self.current_tx.emit_refund(
+                    provenance,
+                    WarmingRefundKind::WarmAccount,
+                    2500,
+                    address,
+                    None,
+                );
+            }
         }
 
-        self.warmed_accounts.insert(address);
+        self.warmed_accounts
+            .entry(address)
+            .or_insert(WarmProvenance { first_warmed_by_tx_index: self.current_tx.tx_index });
+
+        // Non-claiming tx kinds (Deposit, PostExec) never populate these fields because
+        // `emit_refund` above gates on `claims_refunds()`. Previously this function also
+        // cleared them on every call for those kinds; that was defense-in-depth that
+        // obscured the invariant — assert it instead so regressions surface in debug builds.
+        debug_assert!(
+            self.current_tx.kind().is_some_and(PostExecTxKind::claims_refunds) ||
+                (self.current_tx.refund_total == 0 && self.current_tx.refund_events.is_empty()),
+            "non-claiming tx kinds must not have emitted refunds — check emit_refund gating",
+        );
     }
 
     fn observe_slot_touch(&mut self, address: Address, slot: B256, is_sstore: bool) {
@@ -189,13 +269,21 @@ impl SDMWarmingInspector {
         self.observe_account_touch(address, false);
 
         if self.current_tx.touched_slots.insert((address, slot)) &&
-            !self.current_tx.intrinsic_warm_slots.contains(&(address, slot)) &&
-            self.warmed_slots.contains(&(address, slot))
+            !self.current_tx.intrinsic_warm_slots.contains(&(address, slot))
         {
-            self.current_tx.add_refund(if is_sstore { 2100 } else { 2000 });
+            if let Some(provenance) = self.warmed_slots.get(&(address, slot)).copied() {
+                let (kind, amount) = if is_sstore {
+                    (WarmingRefundKind::WarmSstore, 2100)
+                } else {
+                    (WarmingRefundKind::WarmSload, 2000)
+                };
+                self.current_tx.emit_refund(provenance, kind, amount, address, Some(slot));
+            }
         }
 
-        self.warmed_slots.insert((address, slot));
+        self.warmed_slots
+            .entry((address, slot))
+            .or_insert(WarmProvenance { first_warmed_by_tx_index: self.current_tx.tx_index });
     }
 
     #[cfg(test)]
@@ -461,6 +549,9 @@ mod tests {
         inspector.test_observe_account_touch(account);
         let second = inspector.finish_tx();
         assert_eq!(second.refund_total, 2500);
+        assert_eq!(second.refund_events.len(), 1);
+        assert_eq!(second.refund_events[0].kind, WarmingRefundKind::WarmAccount);
+        assert_eq!(second.refund_events[0].first_warmed_by_tx_index, 0);
     }
 
     #[test]
@@ -478,6 +569,8 @@ mod tests {
         inspector.test_observe_slot_touch(account, slot, false);
         let second = inspector.finish_tx();
         assert_eq!(second.refund_total, 2000);
+        assert_eq!(second.refund_events.len(), 1);
+        assert_eq!(second.refund_events[0].kind, WarmingRefundKind::WarmSload);
     }
 
     #[test]
@@ -495,6 +588,8 @@ mod tests {
         inspector.test_observe_slot_touch(account, slot, true);
         let second = inspector.finish_tx();
         assert_eq!(second.refund_total, 2100);
+        assert_eq!(second.refund_events.len(), 1);
+        assert_eq!(second.refund_events[0].kind, WarmingRefundKind::WarmSstore);
     }
 
     #[test]
@@ -506,11 +601,13 @@ mod tests {
         inspector.test_observe_account_touch(account);
         let deposit = inspector.finish_tx();
         assert_eq!(deposit.refund_total, 0);
+        assert!(deposit.refund_events.is_empty());
 
         inspector.begin_tx(PostExecTxContext { tx_index: 1, kind: PostExecTxKind::Normal });
         inspector.test_observe_account_touch(account);
         let later = inspector.finish_tx();
         assert_eq!(later.refund_total, 2500);
+        assert_eq!(later.refund_events[0].first_warmed_by_tx_index, 0);
     }
 
     #[test]
@@ -526,10 +623,11 @@ mod tests {
         inspector.test_observe_account_touch(account);
         let post_exec = inspector.finish_tx();
         assert_eq!(post_exec.refund_total, 0);
+        assert!(post_exec.refund_events.is_empty());
     }
 
     #[test]
-    fn intrinsic_access_list_warmth_does_not_claim() {
+    fn intrinsic_access_list_warmth_does_not_claim_or_steal_provenance() {
         let account = address!("00000000000000000000000000000000000000dd");
         let slot = b256!("0000000000000000000000000000000000000000000000000000000000000003");
         let mut inspector = SDMWarmingInspector::default();
@@ -545,6 +643,44 @@ mod tests {
         inspector.test_observe_slot_touch(account, slot, false);
         let second = inspector.finish_tx();
         assert_eq!(second.refund_total, 2000);
+        assert_eq!(second.refund_events[0].first_warmed_by_tx_index, 0);
+    }
+
+    #[test]
+    fn warming_provenance_chains_across_three_txs() {
+        let account_a = address!("00000000000000000000000000000000000000aa");
+        let account_b = address!("00000000000000000000000000000000000000bb");
+        let slot = b256!("0000000000000000000000000000000000000000000000000000000000000042");
+        let mut inspector = SDMWarmingInspector::default();
+
+        // Tx 0 warms account A (no refund — it's the first toucher).
+        inspector.begin_tx(PostExecTxContext { tx_index: 0, kind: PostExecTxKind::Normal });
+        inspector.test_observe_account_touch(account_a);
+        let tx0 = inspector.finish_tx();
+        assert_eq!(tx0.refund_total, 0);
+        assert!(tx0.refund_events.is_empty());
+
+        // Tx 1 re-warms A (refund, provenance = 0) AND is the first toucher of slot (B, slot).
+        inspector.begin_tx(PostExecTxContext { tx_index: 1, kind: PostExecTxKind::Normal });
+        inspector.test_observe_account_touch(account_a);
+        inspector.test_observe_slot_touch(account_b, slot, true);
+        let tx1 = inspector.finish_tx();
+        assert_eq!(tx1.refund_total, 2500);
+        assert_eq!(tx1.refund_events.len(), 1);
+        assert_eq!(tx1.refund_events[0].kind, WarmingRefundKind::WarmAccount);
+        assert_eq!(tx1.refund_events[0].address, account_a);
+        assert_eq!(tx1.refund_events[0].first_warmed_by_tx_index, 0);
+
+        // Tx 2 re-hits (B, slot) via SSTORE — should refund 2100, attributed to tx 1.
+        inspector.begin_tx(PostExecTxContext { tx_index: 2, kind: PostExecTxKind::Normal });
+        inspector.test_observe_slot_touch(account_b, slot, true);
+        let tx2 = inspector.finish_tx();
+        assert_eq!(tx2.refund_total, 2100);
+        assert_eq!(tx2.refund_events.len(), 1);
+        assert_eq!(tx2.refund_events[0].kind, WarmingRefundKind::WarmSstore);
+        assert_eq!(tx2.refund_events[0].address, account_b);
+        assert_eq!(tx2.refund_events[0].slot, Some(slot));
+        assert_eq!(tx2.refund_events[0].first_warmed_by_tx_index, 1);
     }
 
     #[test]
@@ -557,6 +693,6 @@ mod tests {
         let _ = inspector.finish_tx();
         let last = inspector.take_last_tx_result();
         assert_eq!(last.refund_total, 0);
-        assert_eq!(inspector.take_last_tx_result().refund_total, 0);
+        assert!(inspector.take_last_tx_result().refund_events.is_empty());
     }
 }

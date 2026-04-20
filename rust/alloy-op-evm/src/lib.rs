@@ -19,6 +19,7 @@ pub use env::{
 pub mod error;
 pub use error::{OpTxError, map_op_err};
 
+use alloc::vec::Vec;
 use alloy_evm::{Database, Evm, EvmEnv, EvmFactory, IntoTxEnv, precompiles::PrecompilesMap};
 use alloy_primitives::{Address, Bytes};
 use core::{
@@ -72,6 +73,7 @@ pub struct OpEvm<DB: Database, I, P = OpPrecompiles, Tx = OpTx> {
     >,
     inspect: bool,
     last_tx_warming_savings: u64,
+    last_tx_warming_events: Vec<post_exec::WarmingRefundEvent>,
     _tx: PhantomData<Tx>,
 }
 
@@ -135,6 +137,7 @@ impl<DB: Database, I, P, Tx> OpEvm<DB, I, P, Tx> {
             }),
             inspect,
             last_tx_warming_savings: 0,
+            last_tx_warming_events: Vec::new(),
             _tx: PhantomData,
         }
     }
@@ -152,6 +155,7 @@ impl<DB: Database, I, P, Tx> OpEvm<DB, I, P, Tx> {
     pub fn take_last_post_exec_tx_result(&mut self) -> post_exec::PostExecExecutedTx {
         post_exec::PostExecExecutedTx {
             refund_total: core::mem::take(&mut self.last_tx_warming_savings),
+            refund_events: core::mem::take(&mut self.last_tx_warming_events),
         }
     }
 }
@@ -201,6 +205,7 @@ where
         tx: Self::Tx,
     ) -> Result<ResultAndState<Self::HaltReason>, Self::Error> {
         self.last_tx_warming_savings = 0;
+        self.last_tx_warming_events.clear();
 
         let inner_tx: OpTransaction<TxEnv> = tx.into();
         let result = if self.inspect {
@@ -220,6 +225,7 @@ where
 
         let post_exec_result = self.inner.0.inspector.finish_post_exec_tx();
         self.last_tx_warming_savings = post_exec_result.refund_total;
+        self.last_tx_warming_events = post_exec_result.refund_events;
 
         result.map_err(map_op_err)
     }

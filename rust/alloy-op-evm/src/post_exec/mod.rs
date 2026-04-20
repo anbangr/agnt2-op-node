@@ -7,7 +7,7 @@ use op_alloy::consensus::post_exec::SDMGasEntry;
 
 pub use inspector::{
     PostExecCompositeInspector, PostExecExecutedTx, PostExecTxContext, PostExecTxKind,
-    SDMWarmingInspector,
+    SDMWarmingInspector, WarmingRefundEvent, WarmingRefundKind,
 };
 
 use crate::{
@@ -39,6 +39,9 @@ impl<DB: alloy_evm::Database, I, P, Tx> PostExecEvmExt for OpEvm<DB, I, P, Tx> {
 pub trait PostExecExecutorExt {
     /// Take the accumulated post-exec entries for the current block.
     fn take_post_exec_entries(&mut self) -> Vec<SDMGasEntry>;
+
+    /// Take the exact per-transaction warming refund attribution events aligned with receipts.
+    fn take_warming_events_by_tx(&mut self) -> Vec<Vec<WarmingRefundEvent>>;
 }
 
 impl<E, R, Spec> PostExecExecutorExt for OpBlockExecutor<E, R, Spec>
@@ -49,5 +52,9 @@ where
 {
     fn take_post_exec_entries(&mut self) -> Vec<SDMGasEntry> {
         Self::take_post_exec_entries(self)
+    }
+
+    fn take_warming_events_by_tx(&mut self) -> Vec<Vec<WarmingRefundEvent>> {
+        Self::take_warming_events_by_tx(self)
     }
 }
