@@ -710,18 +710,15 @@ where
                 false,
             )?;
 
-        let post_exec = if post_exec_refund > 0 || !warming_events.is_empty() {
-            Some(PostExecAdjustment {
+        let post_exec =
+            (post_exec_refund > 0 || !warming_events.is_empty()).then_some(PostExecAdjustment {
                 refund: post_exec_refund,
                 sender_refund,
                 beneficiary_delta,
                 base_fee_delta,
                 operator_fee_delta,
                 warming_events,
-            })
-        } else {
-            None
-        };
+            });
 
         Ok(OpTxResult {
             inner: EthTxResult {
