@@ -642,6 +642,43 @@ mod tests {
     }
 
     #[test]
+    fn warming_provenance_chains_across_three_txs() {
+        let account_a = address!("00000000000000000000000000000000000000aa");
+        let account_b = address!("00000000000000000000000000000000000000bb");
+        let slot = b256!("0000000000000000000000000000000000000000000000000000000000000042");
+        let mut inspector = SDMWarmingInspector::default();
+
+        // Tx 0 warms account A (no refund — it's the first toucher).
+        inspector.begin_tx(PostExecTxContext { tx_index: 0, kind: PostExecTxKind::Normal });
+        inspector.test_observe_account_touch(account_a);
+        let tx0 = inspector.finish_tx();
+        assert_eq!(tx0.refund_total, 0);
+        assert!(tx0.refund_events.is_empty());
+
+        // Tx 1 re-warms A (refund, provenance = 0) AND is the first toucher of slot (B, slot).
+        inspector.begin_tx(PostExecTxContext { tx_index: 1, kind: PostExecTxKind::Normal });
+        inspector.test_observe_account_touch(account_a);
+        inspector.test_observe_slot_touch(account_b, slot, true);
+        let tx1 = inspector.finish_tx();
+        assert_eq!(tx1.refund_total, 2500);
+        assert_eq!(tx1.refund_events.len(), 1);
+        assert_eq!(tx1.refund_events[0].kind, WarmingRefundKind::WarmAccount);
+        assert_eq!(tx1.refund_events[0].address, account_a);
+        assert_eq!(tx1.refund_events[0].first_warmed_by_tx_index, 0);
+
+        // Tx 2 re-hits (B, slot) via SSTORE — should refund 2100, attributed to tx 1.
+        inspector.begin_tx(PostExecTxContext { tx_index: 2, kind: PostExecTxKind::Normal });
+        inspector.test_observe_slot_touch(account_b, slot, true);
+        let tx2 = inspector.finish_tx();
+        assert_eq!(tx2.refund_total, 2100);
+        assert_eq!(tx2.refund_events.len(), 1);
+        assert_eq!(tx2.refund_events[0].kind, WarmingRefundKind::WarmSstore);
+        assert_eq!(tx2.refund_events[0].address, account_b);
+        assert_eq!(tx2.refund_events[0].slot, Some(slot));
+        assert_eq!(tx2.refund_events[0].first_warmed_by_tx_index, 1);
+    }
+
+    #[test]
     fn take_last_tx_result_round_trips() {
         let account = address!("00000000000000000000000000000000000000ee");
         let mut inspector = SDMWarmingInspector::default();

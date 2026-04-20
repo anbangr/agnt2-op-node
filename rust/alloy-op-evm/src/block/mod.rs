@@ -1390,6 +1390,200 @@ mod tests {
         }
     }
 
+    fn assert_invalid_post_exec(err: BlockExecutionError, expected_reason: &str) {
+        match err {
+            BlockExecutionError::Validation(BlockValidationError::Other(err)) => {
+                assert_eq!(
+                    err.to_string(),
+                    OpBlockExecutionError::InvalidPostExecPayload(expected_reason.to_string())
+                        .to_string(),
+                );
+            }
+            other => panic!("expected invalid post-exec payload error, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_duplicate_payload_index_fails_pre_execution() {
+        const DA_FOOTPRINT_GAS_SCALAR: u16 = 7;
+        const GAS_LIMIT: u64 = 100_000;
+        const JOVIAN_TIMESTAMP: u64 = 1746806402;
+
+        let mut db = prepare_jovian_db(DA_FOOTPRINT_GAS_SCALAR);
+        let op_chain_hardforks = OpChainHardforks::new(
+            OpHardfork::op_mainnet()
+                .into_iter()
+                .chain(vec![(OpHardfork::Jovian, ForkCondition::Timestamp(JOVIAN_TIMESTAMP))]),
+        );
+        let receipt_builder = OpAlloyReceiptBuilder::default();
+        let mut executor = build_executor(
+            &mut db,
+            &receipt_builder,
+            &op_chain_hardforks,
+            GAS_LIMIT,
+            JOVIAN_TIMESTAMP,
+        );
+        // Two entries colliding on tx index 3 — the second insert must be flagged at construction
+        // and surface as a pre-execution failure.
+        executor.set_post_exec_mode(PostExecMode::Verify(PostExecPayload {
+            version: 1,
+            block_number: 0,
+            gas_refund_entries: vec![
+                SDMGasEntry { index: 3, gas_refund: 10 },
+                SDMGasEntry { index: 3, gas_refund: 20 },
+            ],
+        }));
+
+        let err = executor
+            .apply_pre_execution_changes()
+            .expect_err("duplicate payload index must fail pre-execution");
+        assert_invalid_post_exec(err, "duplicate post-exec payload entry for tx index 3");
+    }
+
+    #[test]
+    fn test_verifier_rejects_payload_targeting_deposit_tx() {
+        const DA_FOOTPRINT_GAS_SCALAR: u16 = 7;
+        const GAS_LIMIT: u64 = 100_000;
+        const JOVIAN_TIMESTAMP: u64 = 1746806402;
+
+        let mut db = prepare_jovian_db(DA_FOOTPRINT_GAS_SCALAR);
+        let op_chain_hardforks = OpChainHardforks::new(
+            OpHardfork::op_mainnet()
+                .into_iter()
+                .chain(vec![(OpHardfork::Jovian, ForkCondition::Timestamp(JOVIAN_TIMESTAMP))]),
+        );
+        let receipt_builder = OpAlloyReceiptBuilder::default();
+        let mut executor = build_executor(
+            &mut db,
+            &receipt_builder,
+            &op_chain_hardforks,
+            GAS_LIMIT,
+            JOVIAN_TIMESTAMP,
+        );
+        executor.set_post_exec_mode(PostExecMode::Verify(PostExecPayload {
+            version: 1,
+            block_number: 0,
+            gas_refund_entries: vec![SDMGasEntry { index: 0, gas_refund: 1 }],
+        }));
+
+        let err = executor
+            .verifier_post_exec_refund_for_tx(0, true, false, 21_000)
+            .expect_err("payload entries must not target deposit txs");
+        assert_invalid_post_exec(err, "payload entry targets deposit tx index 0");
+    }
+
+    #[test]
+    fn test_verifier_rejects_payload_targeting_post_exec_tx() {
+        const DA_FOOTPRINT_GAS_SCALAR: u16 = 7;
+        const GAS_LIMIT: u64 = 100_000;
+        const JOVIAN_TIMESTAMP: u64 = 1746806402;
+
+        let mut db = prepare_jovian_db(DA_FOOTPRINT_GAS_SCALAR);
+        let op_chain_hardforks = OpChainHardforks::new(
+            OpHardfork::op_mainnet()
+                .into_iter()
+                .chain(vec![(OpHardfork::Jovian, ForkCondition::Timestamp(JOVIAN_TIMESTAMP))]),
+        );
+        let receipt_builder = OpAlloyReceiptBuilder::default();
+        let mut executor = build_executor(
+            &mut db,
+            &receipt_builder,
+            &op_chain_hardforks,
+            GAS_LIMIT,
+            JOVIAN_TIMESTAMP,
+        );
+        executor.set_post_exec_mode(PostExecMode::Verify(PostExecPayload {
+            version: 1,
+            block_number: 0,
+            gas_refund_entries: vec![SDMGasEntry { index: 4, gas_refund: 1 }],
+        }));
+
+        // A 0x7D tx reaching this helper with an entry at its own index would mean the payload
+        // is attributing a refund to the synthetic tx itself — refunds are per-normal-tx only.
+        let err = executor
+            .verifier_post_exec_refund_for_tx(4, false, true, 0)
+            .expect_err("payload entries must not target the post-exec tx itself");
+        assert_invalid_post_exec(err, "payload entry targets post-exec tx index 4");
+    }
+
+    #[test]
+    fn test_verifier_rejects_refund_exceeding_raw_gas() {
+        const DA_FOOTPRINT_GAS_SCALAR: u16 = 7;
+        const GAS_LIMIT: u64 = 100_000;
+        const JOVIAN_TIMESTAMP: u64 = 1746806402;
+
+        let mut db = prepare_jovian_db(DA_FOOTPRINT_GAS_SCALAR);
+        let op_chain_hardforks = OpChainHardforks::new(
+            OpHardfork::op_mainnet()
+                .into_iter()
+                .chain(vec![(OpHardfork::Jovian, ForkCondition::Timestamp(JOVIAN_TIMESTAMP))]),
+        );
+        let receipt_builder = OpAlloyReceiptBuilder::default();
+        let mut executor = build_executor(
+            &mut db,
+            &receipt_builder,
+            &op_chain_hardforks,
+            GAS_LIMIT,
+            JOVIAN_TIMESTAMP,
+        );
+        executor.set_post_exec_mode(PostExecMode::Verify(PostExecPayload {
+            version: 1,
+            block_number: 0,
+            gas_refund_entries: vec![SDMGasEntry { index: 2, gas_refund: 50_000 }],
+        }));
+
+        // raw_gas_used < payload refund — a refund that exceeds the tx's raw cost is
+        // impossible under SDM semantics and must be rejected, otherwise canonical gas
+        // would underflow to a bogus value via saturating_sub.
+        let err = executor
+            .verifier_post_exec_refund_for_tx(2, false, false, 40_000)
+            .expect_err("refund greater than raw gas must be rejected");
+        assert_invalid_post_exec(
+            err,
+            "payload refund 50000 exceeds raw gas used 40000 for tx index 2",
+        );
+
+        // Boundary: refund == raw_gas_used is permitted (canonical gas ends up at zero).
+        let ok = executor
+            .verifier_post_exec_refund_for_tx(2, false, false, 50_000)
+            .expect("refund equal to raw gas is permitted");
+        assert_eq!(ok, 50_000);
+    }
+
+    #[test]
+    fn test_verifier_returns_zero_when_no_entry_for_tx() {
+        const DA_FOOTPRINT_GAS_SCALAR: u16 = 7;
+        const GAS_LIMIT: u64 = 100_000;
+        const JOVIAN_TIMESTAMP: u64 = 1746806402;
+
+        let mut db = prepare_jovian_db(DA_FOOTPRINT_GAS_SCALAR);
+        let op_chain_hardforks = OpChainHardforks::new(
+            OpHardfork::op_mainnet()
+                .into_iter()
+                .chain(vec![(OpHardfork::Jovian, ForkCondition::Timestamp(JOVIAN_TIMESTAMP))]),
+        );
+        let receipt_builder = OpAlloyReceiptBuilder::default();
+        let mut executor = build_executor(
+            &mut db,
+            &receipt_builder,
+            &op_chain_hardforks,
+            GAS_LIMIT,
+            JOVIAN_TIMESTAMP,
+        );
+        executor.set_post_exec_mode(PostExecMode::Verify(PostExecPayload {
+            version: 1,
+            block_number: 0,
+            gas_refund_entries: vec![SDMGasEntry { index: 7, gas_refund: 42 }],
+        }));
+
+        // Normal tx that has no entry in the payload — the deposit/post-exec guards must NOT
+        // fire, the helper must return 0 so execution proceeds with raw gas unchanged.
+        let refund = executor
+            .verifier_post_exec_refund_for_tx(3, false, false, 21_000)
+            .expect("no entry for this tx index means no refund");
+        assert_eq!(refund, 0);
+    }
+
     #[test]
     fn test_finish_reports_all_unconsumed_post_exec_entries() {
         const DA_FOOTPRINT_GAS_SCALAR: u16 = 7;
