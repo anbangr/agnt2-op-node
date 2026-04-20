@@ -55,6 +55,37 @@ fn build_post_exec_recovered_tx(
     Recovered::new_unchecked(post_exec_signed, Address::ZERO)
 }
 
+/// Wraps refund entries in a synthetic post-exec transaction and executes it via `execute`.
+///
+/// Returns `true` if a synthetic transaction was executed, `false` if `entries` is empty.
+///
+/// The synthetic transaction MUST execute successfully: any error is surfaced as
+/// `PayloadBuilderError::EvmExecutionError` so the payload build aborts. A verifier
+/// replaying this block will expect the post-exec tx to match the refunds it observes,
+/// so dropping the tx (or returning an empty block) on failure would produce a payload
+/// that no honest verifier can reproduce.
+fn try_include_post_exec_tx<Err>(
+    block_number: u64,
+    entries: Vec<SDMGasEntry>,
+    execute: impl FnOnce(Recovered<OpTransactionSigned>) -> Result<u64, Err>,
+) -> Result<bool, PayloadBuilderError>
+where
+    Err: core::error::Error + Send + Sync + 'static,
+{
+    if entries.is_empty() {
+        return Ok(false);
+    }
+
+    let post_exec_recovered = build_post_exec_recovered_tx(block_number, entries);
+
+    execute(post_exec_recovered).map_err(|err| {
+        warn!(target: "payload_builder", %err, "post-exec tx execution failed, aborting payload");
+        PayloadBuilderError::evm(err)
+    })?;
+    debug!(target: "payload_builder", "post-exec tx included in block");
+    Ok(true)
+}
+
 /// Optimism's payload builder
 #[derive(Debug)]
 pub struct OpPayloadBuilder<
@@ -422,22 +453,9 @@ impl<Txs> OpBuilder<'_, Txs> {
         }
 
         if ctx.builder_config.sdm_enabled {
+            let block_number = builder.evm_mut().block().number().saturating_to();
             let entries = builder.executor_mut().take_post_exec_entries();
-            if !entries.is_empty() {
-                let post_exec_recovered: Recovered<N::SignedTx> = build_post_exec_recovered_tx(
-                    builder.evm_mut().block().number().saturating_to(),
-                    entries,
-                );
-
-                // A verifier replaying this block will expect the post-exec tx to match the
-                // refunds it observes, so dropping it on execution failure would produce a
-                // payload that no honest verifier can reproduce.
-                builder.execute_transaction(post_exec_recovered).map_err(|err| {
-                    warn!(target: "payload_builder", %err, "post-exec tx execution failed, aborting payload");
-                    PayloadBuilderError::EvmExecutionError(Box::new(err))
-                })?;
-                debug!(target: "payload_builder", "post-exec tx included in block");
-            }
+            try_include_post_exec_tx(block_number, entries, |tx| builder.execute_transaction(tx))?;
         }
 
         let BlockBuilderOutcome { execution_result, hashed_state, trie_updates, block } =
@@ -854,12 +872,15 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::build_post_exec_recovered_tx;
+    use super::{build_post_exec_recovered_tx, try_include_post_exec_tx};
     use alloy_consensus::Typed2718;
     use alloy_evm::RecoveredTx;
     use alloy_primitives::Address;
     use op_alloy_consensus::SDMGasEntry;
+    use reth_evm::execute::BlockExecutionError;
     use reth_optimism_primitives::OpTransactionSigned;
+    use reth_payload_builder_primitives::PayloadBuilderError;
+    use std::cell::Cell;
 
     #[test]
     fn build_post_exec_recovered_tx_wraps_entries_in_post_exec_tx() {
@@ -879,5 +900,66 @@ mod tests {
         };
         assert_eq!(tx.inner().payload.block_number, block_number);
         assert_eq!(tx.inner().payload.gas_refund_entries, entries);
+    }
+
+    #[test]
+    fn try_include_post_exec_tx_skips_when_no_entries() {
+        let called = Cell::new(false);
+        let result = try_include_post_exec_tx(1, Vec::new(), |_tx| {
+            called.set(true);
+            Ok::<_, BlockExecutionError>(0)
+        });
+        assert!(matches!(result, Ok(false)));
+        assert!(!called.get(), "execute must not run when there are no entries");
+    }
+
+    #[test]
+    fn try_include_post_exec_tx_executes_synthetic_tx_on_happy_path() {
+        let entries = vec![SDMGasEntry { index: 0, gas_refund: 7 }];
+        let block_number = 99;
+        let captured_ty = Cell::new(0u8);
+        let captured_block_number = Cell::new(0u64);
+        let captured_entries = Cell::new(Vec::<SDMGasEntry>::new());
+
+        let result = try_include_post_exec_tx(block_number, entries.clone(), |tx| {
+            captured_ty.set(tx.tx().ty());
+            let OpTransactionSigned::PostExec(signed) = tx.into_inner() else {
+                panic!("expected synthetic post-exec transaction");
+            };
+            captured_block_number.set(signed.inner().payload.block_number);
+            captured_entries.set(signed.inner().payload.gas_refund_entries.clone());
+            Ok::<_, BlockExecutionError>(21_000)
+        });
+
+        assert!(matches!(result, Ok(true)));
+        assert_eq!(captured_ty.get(), op_alloy_consensus::POST_EXEC_TX_TYPE_ID);
+        assert_eq!(captured_block_number.get(), block_number);
+        assert_eq!(captured_entries.into_inner(), entries);
+    }
+
+    /// Consensus-critical: if the synthetic post-exec tx fails to execute, the payload build
+    /// MUST abort with an error. Returning `Ok(_)` (e.g. an empty block, or silently dropping
+    /// the tx) would diverge the producer from any honest verifier, because the verifier
+    /// observes refunds from the normal txs and expects a matching post-exec tx.
+    #[test]
+    fn try_include_post_exec_tx_aborts_when_execution_fails() {
+        let entries = vec![SDMGasEntry { index: 0, gas_refund: 7 }];
+        let called = Cell::new(false);
+
+        let result = try_include_post_exec_tx(1, entries, |_tx| {
+            called.set(true);
+            Err::<u64, _>(BlockExecutionError::msg("forced synthetic-tx failure"))
+        });
+
+        assert!(called.get(), "execute must be invoked so its error can propagate");
+        match result {
+            Err(PayloadBuilderError::EvmExecutionError(err)) => {
+                assert!(err.to_string().contains("forced synthetic-tx failure"));
+            }
+            Err(other) => panic!("expected EvmExecutionError, got: {other:?}"),
+            Ok(flag) => panic!(
+                "expected Err — returning Ok({flag}) would let a producer ship a payload no verifier can reproduce"
+            ),
+        }
     }
 }
