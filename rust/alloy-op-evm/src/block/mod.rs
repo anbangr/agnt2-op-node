@@ -521,6 +521,11 @@ where
         );
         let effective_gas_price = tx.tx().effective_gas_price(Some(self.evm.block().basefee()));
         // SDM/PostExec is only enabled on forks after Isthmus, which is already post-London.
+        // A saturating_sub landing at zero is intentional and consensus-valid: a legacy tx
+        // with a gas price equal to the basefee pays zero priority fee, so the beneficiary
+        // delta below must be zero as well — we credit back only what the beneficiary
+        // actually received for the refunded gas, which is the (effective_price - basefee)
+        // component.
         let beneficiary_gas_price = effective_gas_price.saturating_sub(basefee);
 
         let base_fee_delta = gas_delta_u256.saturating_mul(U256::from(basefee));
