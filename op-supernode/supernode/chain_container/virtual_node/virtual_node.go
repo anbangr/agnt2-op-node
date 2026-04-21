@@ -96,6 +96,9 @@ func NewVirtualNode(cfg *opnodecfg.Config, log gethlog.Logger, initOverload *rol
 }
 
 func (v *simpleVirtualNode) Start(ctx context.Context) error {
+	if v == nil {
+		return ErrVirtualNodeNotRunning
+	}
 	// Accquire lock while setting up inner node
 	v.mu.Lock()
 	if v.state != VNStateNotStarted {
@@ -174,6 +177,9 @@ func (v *simpleVirtualNode) Start(ctx context.Context) error {
 }
 
 func (v *simpleVirtualNode) Stop(ctx context.Context) error {
+	if v == nil {
+		return nil
+	}
 	v.mu.Lock()
 	defer v.mu.Unlock()
 
@@ -198,6 +204,9 @@ func (v *simpleVirtualNode) State() VNState {
 
 // SafeHeadAtL1 returns the recorded mapping of L1 block -> L2 safe head at or before the given L1 block number.
 func (v *simpleVirtualNode) SafeHeadAtL1(ctx context.Context, l1BlockNum uint64) (eth.BlockID, eth.BlockID, error) {
+	if v == nil {
+		return eth.BlockID{}, eth.BlockID{}, ErrVirtualNodeNotRunning
+	}
 	v.mu.Lock()
 	inner := v.inner
 	v.mu.Unlock()
@@ -216,6 +225,9 @@ var ErrL1AtSafeHeadNotFound = errors.New("l1 at safe head not found")
 // L1AtSafeHead finds the earliest L1 block at which the provided L2 block became local safe,
 // using the monotonicity of SafeDB (L2 safe head number is non-decreasing over L1).
 func (v *simpleVirtualNode) L1AtSafeHead(ctx context.Context, target eth.BlockID) (eth.BlockID, error) {
+	if v == nil {
+		return eth.BlockID{}, ErrVirtualNodeNotRunning
+	}
 	v.mu.Lock()
 	inner := v.inner
 	v.mu.Unlock()
@@ -279,6 +291,9 @@ func (v *simpleVirtualNode) L1AtSafeHead(ctx context.Context, target eth.BlockID
 }
 
 func (v *simpleVirtualNode) SyncStatus(ctx context.Context) (*eth.SyncStatus, error) {
+	if v == nil {
+		return nil, ErrVirtualNodeNotRunning
+	}
 	v.mu.Lock()
 	inner := v.inner
 	v.mu.Unlock()
