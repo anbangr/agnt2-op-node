@@ -15,9 +15,10 @@ import { AddressAliasHelper } from "src/vendor/AddressAliasHelper.sol";
 // Target contract
 import { CrossDomainOwnable3 } from "src/L2/CrossDomainOwnable3.sol";
 
-/// @title XDomainSetter3
-/// @notice A test contract that extends `CrossDomainOwnable3` to test ownership functionality.
-contract XDomainSetter3 is CrossDomainOwnable3 {
+/// @title CrossDomainOwnable3_XDomainSetter_Harness
+/// @notice Harness that extends `CrossDomainOwnable3` with an owner-gated setter so that the
+///         access-control behavior of `_checkOwner` can be exercised end-to-end.
+contract CrossDomainOwnable3_XDomainSetter_Harness is CrossDomainOwnable3 {
     uint256 public value;
 
     function set(uint256 _value) external onlyOwner {
@@ -28,7 +29,7 @@ contract XDomainSetter3 is CrossDomainOwnable3 {
 /// @title CrossDomainOwnable3_TestInit
 /// @notice Reusable test initialization for `CrossDomainOwnable3` tests.
 abstract contract CrossDomainOwnable3_TestInit is CommonTest {
-    XDomainSetter3 setter;
+    CrossDomainOwnable3_XDomainSetter_Harness setter;
 
     /// @notice CrossDomainOwnable3.sol transferOwnership event
     event OwnershipTransferred(address indexed previousOwner, address indexed newOwner, bool isLocal);
@@ -36,75 +37,65 @@ abstract contract CrossDomainOwnable3_TestInit is CommonTest {
     function setUp() public virtual override {
         super.setUp();
         vm.prank(alice);
-        setter = new XDomainSetter3();
+        setter = new CrossDomainOwnable3_XDomainSetter_Harness();
     }
 }
 
-/// @title CrossDomainOwnable3_BasicFunctionality_Test
-/// @notice Tests for the basic functionality of the `CrossDomainOwnable3` contract.
-contract CrossDomainOwnable3_BasicFunctionality_Test is CrossDomainOwnable3_TestInit {
-    /// @notice Tests that the constructor sets the correct variables.
+/// @title CrossDomainOwnable3_Constructor_Test
+/// @notice Tests the initial state of a freshly deployed `CrossDomainOwnable3`.
+contract CrossDomainOwnable3_Constructor_Test is CrossDomainOwnable3_TestInit {
+    /// @notice Tests that the deployer becomes the owner and `isLocal` defaults to true.
     function test_constructor_succeeds() public view {
         assertEq(setter.owner(), alice);
         assertEq(setter.isLocal(), true);
     }
-
-    /// @notice Tests that `set` reverts when the caller is not the owner.
-    function test_localOnlyOwner_notOwner_reverts() public {
-        vm.prank(bob);
-        vm.expectRevert("CrossDomainOwnable3: caller is not the owner");
-        setter.set(1);
-    }
-
-    /// @notice Tests that `onlyOwner` allows the owner to call a protected function locally.
-    function test_localOnlyOwner_succeeds() public {
-        assertEq(setter.isLocal(), true);
-        vm.prank(setter.owner());
-        setter.set(1);
-        assertEq(setter.value(), 1);
-    }
 }
 
 /// @title CrossDomainOwnable3_TransferOwnership_Test
-/// @notice Tests for the ownership transfer functionality of the `CrossDomainOwnable3` contract.
+/// @notice Tests for the ownership transfer functionality of `CrossDomainOwnable3`.
 contract CrossDomainOwnable3_TransferOwnership_Test is CrossDomainOwnable3_TestInit {
-    /// @notice Tests that `transferOwnership` reverts when the caller is not the owner.
-    function test_transferOwnership_notOwner_reverts() public {
-        vm.prank(bob);
+    /// @notice Tests that `transferOwnership(address,bool)` reverts when the caller is not the
+    ///         owner across arbitrary non-owner callers, new owners, and locality flags.
+    function testFuzz_transferOwnership_notOwner_reverts(address _caller, address _newOwner, bool _isLocal) public {
+        vm.assume(_caller != setter.owner());
+        vm.prank(_caller);
         vm.expectRevert("CrossDomainOwnable3: caller is not the owner");
-        setter.transferOwnership({ _owner: bob, _isLocal: true });
+        setter.transferOwnership({ _owner: _newOwner, _isLocal: _isLocal });
     }
 
-    /// @notice Tests that `transferOwnership` reverts for ownership transfers to the zero address
-    ///         when set locally.
-    function test_transferOwnership_zeroAddress_reverts() public {
+    /// @notice Tests that `transferOwnership(address,bool)` reverts when transferring to the zero
+    ///         address for any locality flag.
+    function testFuzz_transferOwnership_zeroAddress_reverts(bool _isLocal) public {
         vm.prank(setter.owner());
         vm.expectRevert("CrossDomainOwnable3: new owner is the zero address");
-        setter.transferOwnership({ _owner: address(0), _isLocal: true });
+        setter.transferOwnership({ _owner: address(0), _isLocal: _isLocal });
     }
 
-    /// @notice Tests that `transferOwnership` reverts for ownership transfers to the zero address.
+    /// @notice Tests that the inherited `transferOwnership(address)` reverts for the zero address.
     function test_transferOwnership_noLocalZeroAddress_reverts() public {
         vm.prank(setter.owner());
         vm.expectRevert("Ownable: new owner is the zero address");
         setter.transferOwnership(address(0));
     }
 
-    /// @notice Tests that `transferOwnership` succeeds when the caller is the owner and the
-    ///         ownership is transferred locally.
-    function test_localTransferOwnership_succeeds() public {
+    /// @notice Tests that `transferOwnership(address,bool)` succeeds when the caller is the owner
+    ///         and locality is kept local for a range of new owners and stored values.
+    function testFuzz_localTransferOwnership_succeeds(address _newOwner, uint256 _value) public {
+        vm.assume(_newOwner != address(0));
+
         vm.expectEmit(true, true, true, true, address(setter));
-        emit OwnershipTransferred(alice, bob);
-        emit OwnershipTransferred(alice, bob, true);
+        emit OwnershipTransferred(alice, _newOwner);
+        emit OwnershipTransferred(alice, _newOwner, true);
 
         vm.prank(setter.owner());
-        setter.transferOwnership({ _owner: bob, _isLocal: true });
+        setter.transferOwnership({ _owner: _newOwner, _isLocal: true });
 
         assertEq(setter.isLocal(), true);
+        assertEq(setter.owner(), _newOwner);
 
-        vm.prank(bob);
-        setter.set(2);
-        assertEq(setter.value(), 2);
+        vm.prank(_newOwner);
+        setter.set(_value);
+        assertEq(setter.value(), _value);
     }
 
     /// @notice The existing transferOwnership(address) method still exists on the contract.
@@ -125,39 +116,67 @@ contract CrossDomainOwnable3_TransferOwnership_Test is CrossDomainOwnable3_TestI
         assertEq(setter.value(), 2);
     }
 
-    /// @notice Tests that `transferOwnership` succeeds when the caller is the owner and the
-    ///         ownership is transferred non-locally.
-    function test_crossDomainTransferOwnership_succeeds() public {
+    /// @notice Tests that `transferOwnership(address,bool)` succeeds when transferring to a
+    ///         cross-domain owner and that a relayed message from that owner can invoke the
+    ///         owner-only setter.
+    function testFuzz_crossDomainTransferOwnership_succeeds(address _newOwner, uint256 _value) public {
+        vm.assume(_newOwner != address(0));
+        vm.assume(_newOwner != address(l2CrossDomainMessenger));
+
         vm.expectEmit(true, true, true, true, address(setter));
-        emit OwnershipTransferred(alice, bob);
-        emit OwnershipTransferred(alice, bob, false);
+        emit OwnershipTransferred(alice, _newOwner);
+        emit OwnershipTransferred(alice, _newOwner, false);
 
         vm.prank(setter.owner());
-        setter.transferOwnership({ _owner: bob, _isLocal: false });
+        setter.transferOwnership({ _owner: _newOwner, _isLocal: false });
 
         assertEq(setter.isLocal(), false);
+        assertEq(setter.owner(), _newOwner);
 
         // Simulate the L2 execution where the call is coming from the L1CrossDomainMessenger
         vm.prank(AddressAliasHelper.applyL1ToL2Alias(address(l1CrossDomainMessenger)));
         l2CrossDomainMessenger.relayMessage(
-            Encoding.encodeVersionedNonce(1, 1), bob, address(setter), 0, 0, abi.encodeCall(XDomainSetter3.set, (2))
+            Encoding.encodeVersionedNonce(1, 1),
+            _newOwner,
+            address(setter),
+            0,
+            0,
+            abi.encodeCall(CrossDomainOwnable3_XDomainSetter_Harness.set, (_value))
         );
 
-        assertEq(setter.value(), 2);
+        assertEq(setter.value(), _value);
     }
 }
 
-/// @title CrossDomainOwnable3_CrossDomainAccess_Test
-/// @notice Tests for cross-domain access control in the `CrossDomainOwnable3` contract.
-contract CrossDomainOwnable3_CrossDomainAccess_Test is CrossDomainOwnable3_TestInit {
-    /// @notice Tests that the `XDomainSetter3` contract reverts after the ownership has been
-    ///         transferred to a new owner.
-    function test_crossDomainOnlyOwner_notOwner_reverts() public {
-        vm.expectEmit(true, true, true, true);
+/// @title CrossDomainOwnable3_CheckOwner_Test
+/// @notice Tests for the overridden `_checkOwner` function, exercised through the harness's
+///         `onlyOwner`-gated `set` function in both local and cross-domain modes.
+contract CrossDomainOwnable3_CheckOwner_Test is CrossDomainOwnable3_TestInit {
+    /// @notice Tests that `_checkOwner` reverts in local mode when the caller is not the owner.
+    function testFuzz_checkOwner_localNotOwner_reverts(address _caller, uint256 _value) public {
+        vm.assume(_caller != setter.owner());
+        vm.prank(_caller);
+        vm.expectRevert("CrossDomainOwnable3: caller is not the owner");
+        setter.set(_value);
+    }
 
+    /// @notice Tests that `_checkOwner` allows the owner to call `onlyOwner` in local mode.
+    function testFuzz_checkOwner_localOwner_succeeds(uint256 _value) public {
+        assertEq(setter.isLocal(), true);
+        vm.prank(setter.owner());
+        setter.set(_value);
+        assertEq(setter.value(), _value);
+    }
+
+    /// @notice Tests that `_checkOwner` reverts in cross-domain mode when the messenger's
+    ///         `xDomainMessageSender` does not match the owner, even though the caller is the
+    ///         messenger itself.
+    function testFuzz_checkOwner_crossDomainNotOwner_reverts(address _xDomainSender) public {
+        vm.assume(_xDomainSender != alice);
+
+        vm.expectEmit(true, true, true, true);
         // OpenZeppelin Ownable.sol transferOwnership event
         emit OwnershipTransferred(alice, alice);
-
         // CrossDomainOwnable3.sol transferOwnership event
         emit OwnershipTransferred(alice, alice, false);
 
@@ -166,7 +185,7 @@ contract CrossDomainOwnable3_CrossDomainAccess_Test is CrossDomainOwnable3_TestI
 
         // set the xDomainMsgSender storage slot
         bytes32 key = bytes32(uint256(204));
-        bytes32 value = Bytes32AddressLib.fillLast12Bytes(bob);
+        bytes32 value = Bytes32AddressLib.fillLast12Bytes(_xDomainSender);
         vm.store(address(l2CrossDomainMessenger), key, value);
 
         vm.prank(address(l2CrossDomainMessenger));
@@ -174,14 +193,12 @@ contract CrossDomainOwnable3_CrossDomainAccess_Test is CrossDomainOwnable3_TestI
         setter.set(1);
     }
 
-    /// @notice Tests that a relayed message to the `XDomainSetter3` contract reverts after its
-    ///         ownership has been transferred to a new owner.
-    function test_crossDomainOnlyOwner_notOwner2_reverts() public {
+    /// @notice Tests that a relayed message to the setter fails (surfaced via a
+    ///         `FailedRelayedMessage` event) when the cross-domain sender is not the owner.
+    function test_checkOwner_crossDomainRelayNotOwner_reverts() public {
         vm.expectEmit(true, true, true, true);
-
         // OpenZeppelin Ownable.sol transferOwnership event
         emit OwnershipTransferred(alice, alice);
-
         // CrossDomainOwnable3.sol transferOwnership event
         emit OwnershipTransferred(alice, alice, false);
 
@@ -195,7 +212,7 @@ contract CrossDomainOwnable3_CrossDomainAccess_Test is CrossDomainOwnable3_TestI
         address target = address(setter);
         uint256 value = 0;
         uint256 minGasLimit = 0;
-        bytes memory message = abi.encodeCall(XDomainSetter3.set, (1));
+        bytes memory message = abi.encodeCall(CrossDomainOwnable3_XDomainSetter_Harness.set, (1));
 
         bytes32 hash = Hashing.hashCrossDomainMessage(
             Encoding.encodeVersionedNonce(nonce, 1), sender, target, value, minGasLimit, message
@@ -213,21 +230,21 @@ contract CrossDomainOwnable3_CrossDomainAccess_Test is CrossDomainOwnable3_TestI
         assertEq(setter.value(), 0);
     }
 
-    /// @notice Tests that the `XDomainSetter3` contract reverts for a non-messenger caller after
-    ///         the ownership has been transferred to a new owner.
-    function test_crossDomainOnlyOwner_notMessenger_reverts() public {
-        vm.expectEmit(true, true, true, true);
+    /// @notice Tests that `_checkOwner` reverts in cross-domain mode when the caller is not the
+    ///         messenger.
+    function testFuzz_checkOwner_crossDomainNotMessenger_reverts(address _caller) public {
+        vm.assume(_caller != address(l2CrossDomainMessenger));
 
+        vm.expectEmit(true, true, true, true);
         // OpenZeppelin Ownable.sol transferOwnership event
         emit OwnershipTransferred(alice, alice);
-
         // CrossDomainOwnable3.sol transferOwnership event
         emit OwnershipTransferred(alice, alice, false);
 
         vm.prank(setter.owner());
         setter.transferOwnership({ _owner: alice, _isLocal: false });
 
-        vm.prank(bob);
+        vm.prank(_caller);
         vm.expectRevert("CrossDomainOwnable3: caller is not the messenger");
         setter.set(1);
     }
