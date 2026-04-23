@@ -5,6 +5,7 @@ pragma solidity 0.8.15;
 import { CommonTest } from "test/setup/CommonTest.sol";
 
 // Libraries
+import { Constants } from "src/libraries/Constants.sol";
 import { Hashing } from "src/libraries/Hashing.sol";
 import { Encoding } from "src/libraries/Encoding.sol";
 import { Bytes32AddressLib } from "@rari-capital/solmate/src/utils/Bytes32AddressLib.sol";
@@ -122,6 +123,9 @@ contract CrossDomainOwnable3_TransferOwnership_Test is CrossDomainOwnable3_TestI
     function testFuzz_crossDomainTransferOwnership_succeeds(address _newOwner, uint256 _value) public {
         vm.assume(_newOwner != address(0));
         vm.assume(_newOwner != address(l2CrossDomainMessenger));
+        // The messenger treats DEFAULT_L2_SENDER as "unset" and reverts when it is surfaced via
+        // `xDomainMessageSender()`, which would fail the onlyOwner check inside the relayed call.
+        vm.assume(_newOwner != Constants.DEFAULT_L2_SENDER);
 
         vm.expectEmit(true, true, true, true, address(setter));
         emit OwnershipTransferred(alice, _newOwner);
@@ -173,6 +177,9 @@ contract CrossDomainOwnable3_CheckOwner_Test is CrossDomainOwnable3_TestInit {
     ///         messenger itself.
     function testFuzz_checkOwner_crossDomainNotOwner_reverts(address _xDomainSender) public {
         vm.assume(_xDomainSender != alice);
+        // `xDomainMessageSender()` reverts when the stored value equals DEFAULT_L2_SENDER, so
+        // that case cannot exercise the owner-mismatch revert this test targets.
+        vm.assume(_xDomainSender != Constants.DEFAULT_L2_SENDER);
 
         vm.expectEmit(true, true, true, true);
         // OpenZeppelin Ownable.sol transferOwnership event
