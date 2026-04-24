@@ -1656,6 +1656,20 @@ jobs:
           command: |
             just check-op-geth-version
 
+  check-superchain-bundle:
+    docker:
+      - image: <<pipeline.parameters.c-default_docker_image>>
+    resource_class: small
+    steps:
+      - utils/checkout-with-mise:
+          checkout-method: blobless
+          enable-mise-cache: true
+      - run:
+          name: regenerate superchain bundle and verify no drift
+          command: |
+            bash op-core/superchain/sync-superchain.sh
+            git diff --exit-code op-core/superchain
+
   check-nut-locks:
     docker:
       - image: <<pipeline.parameters.c-default_docker_image>>
@@ -2473,6 +2487,9 @@ workflows:
           context:
             - circleci-repo-readonly-authenticated-github-token
       - check-op-geth-version:
+          context:
+            - circleci-repo-readonly-authenticated-github-token
+      - check-superchain-bundle:
           context:
             - circleci-repo-readonly-authenticated-github-token
       - check-nut-locks:
