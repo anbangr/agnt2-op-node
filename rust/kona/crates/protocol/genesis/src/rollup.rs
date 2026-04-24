@@ -304,6 +304,7 @@ impl RollupConfig {
     /// Returns true if SDM post-exec transactions are active at the given timestamp.
     ///
     /// SDM is currently unscheduled and must not activate as part of Jovian or Karst.
+    #[must_use]
     pub const fn is_sdm_active(&self, _timestamp: u64) -> bool {
         false
     }

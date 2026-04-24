@@ -25,6 +25,7 @@ pub trait BuildPostExecTransaction: SignedTransaction + OpTransaction + Sized {
     fn build_post_exec(block_number: u64, gas_refund_entries: Vec<SDMGasEntry>) -> Self;
 
     /// Builds a recovered post-exec tx with the canonical zero signer.
+    #[must_use]
     fn build_recovered_post_exec(
         block_number: u64,
         gas_refund_entries: Vec<SDMGasEntry>,

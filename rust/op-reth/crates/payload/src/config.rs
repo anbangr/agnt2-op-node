@@ -24,6 +24,7 @@ impl OpBuilderConfig {
 
     /// Creates a new OP builder configuration with SDM (Sequencer-Defined Metering) enabled per
     /// the given flag.
+    #[must_use]
     pub const fn new_with_sdm(
         da_config: OpDAConfig,
         gas_limit_config: OpGasLimitConfig,

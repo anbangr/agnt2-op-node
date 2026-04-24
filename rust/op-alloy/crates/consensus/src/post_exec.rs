@@ -119,6 +119,7 @@ pub enum PostExecPayloadValidationError {
 
 impl PostExecPayloadValidationError {
     /// Returns this error as an owned string.
+    #[must_use]
     pub fn into_string(self) -> String {
         self.to_string()
     }
@@ -129,6 +130,11 @@ impl PostExecPayloadValidationError {
 /// This enforces the shared consensus structure rules: post-exec transactions are only valid after
 /// activation, at most one may be present, and when present it must be the final transaction and be
 /// anchored to the containing block number.
+///
+/// # Errors
+///
+/// Returns [`PostExecPayloadValidationError`] if the post-exec transaction is not valid for the
+/// block or SDM activation state.
 pub fn parse_post_exec_payload_from_transactions<'a, I, T>(
     transactions: I,
     block_number: u64,

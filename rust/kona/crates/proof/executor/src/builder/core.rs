@@ -265,7 +265,7 @@ where
             .collect::<Result<Vec<_>, RecoveryError>>()
             .map_err(ExecutorError::Recovery)?;
         let post_exec_mode = parse_post_exec_payload_from_transactions(
-            transactions.iter().map(|tx| tx.tx()),
+            transactions.iter().map(RecoveredTx::tx),
             block_env.number.saturating_to(),
             self.config.is_sdm_active(block_env.timestamp.saturating_to()),
         )

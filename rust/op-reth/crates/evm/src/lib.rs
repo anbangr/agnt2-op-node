@@ -132,6 +132,7 @@ impl<ChainSpec: OpHardforks, N: NodePrimitives, R> OpEvmConfig<ChainSpec, N, R> 
     }
 
     /// Configures the temporary SDM integration-test override.
+    #[must_use]
     pub const fn with_sdm_enabled(mut self, sdm_enabled: bool) -> Self {
         self.sdm_enabled = sdm_enabled;
         self
@@ -287,7 +288,7 @@ where
             parent_hash: parent.hash(),
             parent_beacon_block_root: attributes.parent_beacon_block_root,
             extra_data: attributes.extra_data,
-            post_exec_mode: Default::default(),
+            post_exec_mode: PostExecMode::default(),
         })
     }
 }

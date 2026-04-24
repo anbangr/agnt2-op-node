@@ -25,6 +25,10 @@ use crate::{OpBlockExecutorFactory, OpEvmConfig, OpEvmFactory, OpTx, PostExecMod
 /// Optimism-specific EVM helpers that expose post-exec-aware executors and builders.
 pub trait ConfigurePostExecEvm: ConfigureEvm {
     /// Returns a block executor for the given block with explicit post-exec entry access.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if creating the block EVM fails.
     fn post_exec_executor_for_block<'a, DB: Database>(
         &'a self,
         db: &'a mut State<DB>,
@@ -36,6 +40,10 @@ pub trait ConfigurePostExecEvm: ConfigureEvm {
     >;
 
     /// Returns a block builder for the next block with explicit post-exec entry access.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if deriving the next-block EVM environment fails.
     fn post_exec_builder_for_next_block<'a, DB: Database + 'a>(
         &'a self,
         db: &'a mut State<DB>,

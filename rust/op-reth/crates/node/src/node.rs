@@ -857,6 +857,7 @@ impl<NetworkT, RpcMiddleware> OpAddOnsBuilder<NetworkT, RpcMiddleware> {
     }
 
     /// Configure the temporary SDM integration-test override.
+    #[must_use]
     pub const fn with_sdm_enabled(mut self, sdm_enabled: bool) -> Self {
         self.sdm_enabled = sdm_enabled;
         self
@@ -1001,6 +1002,7 @@ pub struct OpExecutorBuilder {
 
 impl OpExecutorBuilder {
     /// Configure the temporary SDM integration-test override.
+    #[must_use]
     pub const fn with_sdm_enabled(mut self, sdm_enabled: bool) -> Self {
         self.sdm_enabled = sdm_enabled;
         self
@@ -1271,6 +1273,7 @@ impl OpPayloadBuilder {
     }
 
     /// Configure whether the OP payload builder should inject a post-exec tx in integration tests.
+    #[must_use]
     pub const fn with_sdm_enabled(mut self, sdm_enabled: bool) -> Self {
         self.sdm_enabled = sdm_enabled;
         self

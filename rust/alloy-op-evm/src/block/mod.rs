@@ -5,7 +5,7 @@ use alloc::{
     borrow::Cow, boxed::Box, collections::BTreeMap, format, string::String, vec, vec::Vec,
 };
 use alloy_consensus::{Eip658Value, Header, Transaction, TransactionEnvelope, TxReceipt};
-use alloy_eips::{Encodable2718, Typed2718};
+use alloy_eips::{Encodable2718, Typed2718, eip7685::Requests};
 use alloy_evm::{
     Database, Evm, EvmFactory, FromRecoveredTx, FromTxWithEncoded, IntoTxEnv, RecoveredTx,
     block::{
@@ -329,6 +329,7 @@ where
     }
 
     /// Set the post-exec execution mode for the executor.
+    #[must_use]
     pub fn with_post_exec_mode(mut self, post_exec_mode: PostExecMode) -> Self {
         self.set_post_exec_mode(post_exec_mode);
         self
@@ -422,7 +423,7 @@ where
         Ok(encoded.saturating_mul(da_footprint_gas_scalar))
     }
 
-    fn invalid_post_exec_payload(&self, reason: impl Into<String>) -> BlockExecutionError {
+    fn invalid_post_exec_payload(reason: impl Into<String>) -> BlockExecutionError {
         BlockExecutionError::Validation(BlockValidationError::Other(Box::new(
             OpBlockExecutionError::InvalidPostExecPayload(reason.into()),
         )))
@@ -440,19 +441,19 @@ where
         };
 
         if is_deposit {
-            return Err(self.invalid_post_exec_payload(format!(
+            return Err(Self::invalid_post_exec_payload(format!(
                 "payload entry targets deposit tx index {tx_index}"
             )));
         }
 
         if is_post_exec {
-            return Err(self.invalid_post_exec_payload(format!(
+            return Err(Self::invalid_post_exec_payload(format!(
                 "payload entry targets post-exec tx index {tx_index}"
             )));
         }
 
         if refund > raw_gas_used {
-            return Err(self.invalid_post_exec_payload(format!(
+            return Err(Self::invalid_post_exec_payload(format!(
                 "payload refund {refund} exceeds raw gas used {raw_gas_used} for tx index {tx_index}"
             )));
         }
@@ -572,7 +573,7 @@ where
 
         let gas_delta = raw_gas_used.saturating_sub(canonical_gas_used);
         let gas_delta_u256 = U256::from(gas_delta);
-        let basefee = self.evm.block().basefee() as u128;
+        let basefee = u128::from(self.evm.block().basefee());
         let spec_id = spec_by_timestamp_after_bedrock(
             &self.spec,
             self.evm.block().timestamp().saturating_to(),
@@ -650,11 +651,11 @@ where
 
     fn apply_pre_execution_changes(&mut self) -> Result<(), BlockExecutionError> {
         if let Some(reason) = self.post_exec.invalid_reason() {
-            return Err(self.invalid_post_exec_payload(String::from(reason)));
+            return Err(Self::invalid_post_exec_payload(String::from(reason)));
         }
         let block_number = self.evm.block().number().saturating_to::<u64>();
         if let Some(reason) = self.post_exec.verify_block_number(block_number) {
-            return Err(self.invalid_post_exec_payload(reason));
+            return Err(Self::invalid_post_exec_payload(reason));
         }
 
         self.system_caller.apply_blockhashes_contract_call(self.ctx.parent_hash, &mut self.evm)?;
@@ -698,12 +699,12 @@ where
         if is_post_exec {
             let payload =
                 tx.tx().as_post_exec().map(|tx| &tx.inner().payload).ok_or_else(|| {
-                    self.invalid_post_exec_payload(format!(
+                    Self::invalid_post_exec_payload(format!(
                     "transaction at index {tx_index} has post-exec type but no post-exec payload",
                 ))
                 })?;
             if let Err(reason) = self.post_exec.verify_post_exec_tx(tx_index, payload) {
-                return Err(self.invalid_post_exec_payload(reason));
+                return Err(Self::invalid_post_exec_payload(reason));
             }
             // Validates that no Verify payload entry targets this tx index; refund is always 0.
             self.verifier_post_exec_refund_for_tx(tx_index, false, true, 0)?;
@@ -712,11 +713,11 @@ where
                     result: ResultAndState::new(
                         ExecutionResult::Success {
                             reason: SuccessReason::Stop,
-                            gas: Default::default(),
+                            gas: revm::context::result::ResultGas::default(),
                             logs: vec![],
                             output: Output::Call(Bytes::default()),
                         },
-                        Default::default(),
+                        EvmState::default(),
                     ),
                     blob_gas_used: 0,
                     tx_type: tx.tx().tx_type(),
@@ -775,7 +776,7 @@ where
             // would ship a block it can't verify itself. Fail here with a loud error
             // instead of letting `saturating_sub` mask the discrepancy.
             if refund > raw_gas_used {
-                return Err(self.invalid_post_exec_payload(format!(
+                return Err(Self::invalid_post_exec_payload(format!(
                     "produced refund {refund} exceeds raw gas used {raw_gas_used} for tx index {tx_index}",
                 )));
             }
@@ -928,7 +929,7 @@ where
     ) -> Result<(Self::Evm, BlockExecutionResult<R::Receipt>), BlockExecutionError> {
         let indexes = self.post_exec.remaining_verifier_indexes();
         if !indexes.is_empty() {
-            return Err(self.invalid_post_exec_payload(format!(
+            return Err(Self::invalid_post_exec_payload(format!(
                 "{} unconsumed post-exec payload entries for tx indexes {:?}",
                 indexes.len(),
                 indexes,
@@ -956,7 +957,7 @@ where
             self.evm,
             BlockExecutionResult {
                 receipts: self.receipts,
-                requests: Default::default(),
+                requests: Requests::default(),
                 gas_used: self.gas_used,
                 blob_gas_used: self.da_footprint_used,
             },
@@ -1436,7 +1437,7 @@ mod tests {
     fn test_mismatched_payload_block_number_fails_pre_execution() {
         const DA_FOOTPRINT_GAS_SCALAR: u16 = 7;
         const GAS_LIMIT: u64 = 100_000;
-        const JOVIAN_TIMESTAMP: u64 = 1746806402;
+        const JOVIAN_TIMESTAMP: u64 = 1_746_806_402;
 
         let mut db = prepare_jovian_db(DA_FOOTPRINT_GAS_SCALAR);
         let op_chain_hardforks = OpChainHardforks::new(
@@ -1493,7 +1494,7 @@ mod tests {
     fn test_duplicate_payload_index_fails_pre_execution() {
         const DA_FOOTPRINT_GAS_SCALAR: u16 = 7;
         const GAS_LIMIT: u64 = 100_000;
-        const JOVIAN_TIMESTAMP: u64 = 1746806402;
+        const JOVIAN_TIMESTAMP: u64 = 1_746_806_402;
 
         let mut db = prepare_jovian_db(DA_FOOTPRINT_GAS_SCALAR);
         let op_chain_hardforks = OpChainHardforks::new(
@@ -1530,7 +1531,7 @@ mod tests {
     fn test_verifier_rejects_payload_targeting_deposit_tx() {
         const DA_FOOTPRINT_GAS_SCALAR: u16 = 7;
         const GAS_LIMIT: u64 = 100_000;
-        const JOVIAN_TIMESTAMP: u64 = 1746806402;
+        const JOVIAN_TIMESTAMP: u64 = 1_746_806_402;
 
         let mut db = prepare_jovian_db(DA_FOOTPRINT_GAS_SCALAR);
         let op_chain_hardforks = OpChainHardforks::new(
@@ -1562,7 +1563,7 @@ mod tests {
     fn test_verifier_rejects_payload_targeting_post_exec_tx() {
         const DA_FOOTPRINT_GAS_SCALAR: u16 = 7;
         const GAS_LIMIT: u64 = 100_000;
-        const JOVIAN_TIMESTAMP: u64 = 1746806402;
+        const JOVIAN_TIMESTAMP: u64 = 1_746_806_402;
 
         let mut db = prepare_jovian_db(DA_FOOTPRINT_GAS_SCALAR);
         let op_chain_hardforks = OpChainHardforks::new(
@@ -1596,7 +1597,7 @@ mod tests {
     fn test_verifier_rejects_refund_exceeding_raw_gas() {
         const DA_FOOTPRINT_GAS_SCALAR: u16 = 7;
         const GAS_LIMIT: u64 = 100_000;
-        const JOVIAN_TIMESTAMP: u64 = 1746806402;
+        const JOVIAN_TIMESTAMP: u64 = 1_746_806_402;
 
         let mut db = prepare_jovian_db(DA_FOOTPRINT_GAS_SCALAR);
         let op_chain_hardforks = OpChainHardforks::new(
@@ -1640,7 +1641,7 @@ mod tests {
     fn test_verifier_returns_zero_when_no_entry_for_tx() {
         const DA_FOOTPRINT_GAS_SCALAR: u16 = 7;
         const GAS_LIMIT: u64 = 100_000;
-        const JOVIAN_TIMESTAMP: u64 = 1746806402;
+        const JOVIAN_TIMESTAMP: u64 = 1_746_806_402;
 
         let mut db = prepare_jovian_db(DA_FOOTPRINT_GAS_SCALAR);
         let op_chain_hardforks = OpChainHardforks::new(
@@ -1674,7 +1675,7 @@ mod tests {
     fn test_finish_reports_all_unconsumed_post_exec_entries() {
         const DA_FOOTPRINT_GAS_SCALAR: u16 = 7;
         const GAS_LIMIT: u64 = 100_000;
-        const JOVIAN_TIMESTAMP: u64 = 1746806402;
+        const JOVIAN_TIMESTAMP: u64 = 1_746_806_402;
 
         let mut db = prepare_jovian_db(DA_FOOTPRINT_GAS_SCALAR);
         let op_chain_hardforks = OpChainHardforks::new(
@@ -1699,9 +1700,8 @@ mod tests {
             ],
         }));
 
-        let err = match executor.finish() {
-            Ok(_) => panic!("unconsumed verifier entries must fail"),
-            Err(err) => err,
+        let Err(err) = executor.finish() else {
+            panic!("unconsumed verifier entries must fail");
         };
         match err {
             BlockExecutionError::Validation(BlockValidationError::Other(err)) => {
@@ -1728,7 +1728,7 @@ mod tests {
 
         const DA_FOOTPRINT_GAS_SCALAR: u16 = 7;
         const GAS_LIMIT: u64 = 100_000;
-        const JOVIAN_TIMESTAMP: u64 = 1746806402;
+        const JOVIAN_TIMESTAMP: u64 = 1_746_806_402;
 
         let mut db = prepare_jovian_db(DA_FOOTPRINT_GAS_SCALAR);
         let op_chain_hardforks = OpChainHardforks::new(
