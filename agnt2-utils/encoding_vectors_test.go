@@ -101,4 +101,19 @@ func TestEncodingVectors(t *testing.T) {
 		require.Equal(t, "0x6ec4babc86d7fe8ac9dba9595cdc2273eb87d9588de683266a84f883373abb66", got,
 			"MISMATCH: Vector3_MaxPayout")
 	})
+
+	// Vector 4: 5-leaf MMR root. Decomposes to peaks 4+1, exercising multi-peak
+	// bagging that the 3-leaf vector (peaks 2+1, only one fold step) does not
+	// cover. Added in /review specialist pass alongside TS + Solidity equivalents.
+	t.Run("Vector4_5StepMultiPeak", func(t *testing.T) {
+		leaf0 := encodeLeaf("test-wf-005", "step-1", "worker-a", big.NewInt(1000), [32]byte{})
+		leaf1 := encodeLeaf("test-wf-005", "step-2", "worker-b", big.NewInt(2000), leaf0)
+		leaf2 := encodeLeaf("test-wf-005", "step-3", "worker-c", big.NewInt(3000), leaf1)
+		leaf3 := encodeLeaf("test-wf-005", "step-4", "worker-d", big.NewInt(4000), leaf2)
+		leaf4 := encodeLeaf("test-wf-005", "step-5", "worker-e", big.NewInt(5000), leaf3)
+		root := mmrGetRoot([][32]byte{leaf0, leaf1, leaf2, leaf3, leaf4})
+		got := fmt.Sprintf("0x%x", root[:])
+		require.Equal(t, "0xe34cda67eaf574138a02ab6ea87fd1ec55f8e3c09545f2c7c44edb8365316c91", got,
+			"MISMATCH: Vector4_5StepMultiPeak")
+	})
 }
