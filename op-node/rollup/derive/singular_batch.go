@@ -25,6 +25,11 @@ type SingularBatch struct {
 	EpochHash    common.Hash  // l1 block hash
 	Timestamp    uint64       // l2 block timestamp
 	Transactions []hexutil.Bytes
+
+	// AGNT2 extensions
+	InteractionRoot   *common.Hash   `rlp:"optional"` // MMR root of the interaction trie
+	PayloadCommitment *hexutil.Bytes `rlp:"optional"` // Commitment used for DA
+	DATarget          *uint8         `rlp:"optional"` // DA system identifier (e.g., 0=calldata, 1=EigenDA)
 }
 
 func (b *SingularBatch) AsSingularBatch() (*SingularBatch, bool) { return b, true }

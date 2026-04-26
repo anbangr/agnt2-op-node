@@ -131,6 +131,11 @@ func (aq *AttributesQueue) createNextAttributes(ctx context.Context, batch *Sing
 	attrs.NoTxPool = true
 	attrs.Transactions = append(attrs.Transactions, batch.Transactions...)
 
+	// Wire AGNT2 extensions
+	attrs.InteractionRoot = batch.InteractionRoot
+	attrs.PayloadCommitment = batch.PayloadCommitment
+	attrs.DATarget = batch.DATarget
+
 	aq.log.Info("generated attributes in payload queue", "txs", len(attrs.Transactions), "timestamp", batch.Timestamp)
 
 	return attrs, nil
