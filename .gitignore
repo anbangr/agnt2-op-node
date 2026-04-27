@@ -57,3 +57,4 @@ crytic-export
 
 # Rust files
 **/target
+agnt2-utils/cmd/root-xcheck/root-xcheck
