@@ -116,4 +116,26 @@ func TestEncodingVectors(t *testing.T) {
 		require.Equal(t, "0xe34cda67eaf574138a02ab6ea87fd1ec55f8e3c09545f2c7c44edb8365316c91", got,
 			"MISMATCH: Vector4_5StepMultiPeak")
 	})
+
+		// Vector 5: 7-leaf MMR root. Decomposes to peaks 4+2+1, exercising 3-peak
+		// right-to-left fold. v1_3step (peaks 2+1, 1 fold step) and v4_5step
+		// (peaks 4+1, 1 fold step) only cover single-fold; this vector locks the
+		// full multi-peak bagging so a wrong fold direction in production verifier
+		// code can't pass the prior 4 vectors silently. /review re-iteration
+		// 2026-04-26 — Claude adversarial subagent + Codex multi-specialist.
+		t.Run("Vector5_7StepThreePeak", func(t *testing.T) {
+			leaves := make([][32]byte, 0, 7)
+			var prev [32]byte
+			for i := 1; i <= 7; i++ {
+				stepID := fmt.Sprintf("step-%d", i)
+				agentRole := fmt.Sprintf("worker-%c", 'a'+byte(i-1))
+				payout := big.NewInt(int64(i * 1000))
+				prev = encodeLeaf("test-wf-007", stepID, agentRole, payout, prev)
+				leaves = append(leaves, prev)
+			}
+			root := mmrGetRoot(leaves)
+			got := fmt.Sprintf("0x%x", root[:])
+			require.Equal(t, "0x47c10071cf38e435490a3b4fcae8f9b37f088d14556c7c2274abdb5b88716499", got,
+				"MISMATCH: Vector5_7StepThreePeak — Go MMR fold diverged from TS+Solidity locked root")
+		})
 }
