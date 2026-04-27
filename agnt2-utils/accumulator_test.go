@@ -128,6 +128,33 @@ func TestAccumulator_GetReturnsCopy(t *testing.T) {
 	require.NotEqual(t, got.Peaks, got2.Peaks, "internal state must be insulated from caller mutation")
 }
 
+// TestAccumulator_AssertRoot verifies the assertion helper returns nil on a
+// matching root and a descriptive error on mismatch or unknown block.
+func TestAccumulator_AssertRoot(t *testing.T) {
+	acc := NewAccumulator()
+	blockHash := common.HexToHash("0xdeadbeef")
+
+	leaves := makeLeaves(3)
+	state := IncrementalAppend(EmptyAccumulatorState(), leaves)
+	acc.Put(blockHash, state)
+
+	// nil on match
+	require.NoError(t, acc.AssertRoot(blockHash, state.Root))
+
+	// error on mismatch
+	wrongRoot := common.HexToHash("0x1234")
+	err := acc.AssertRoot(blockHash, wrongRoot)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "root mismatch")
+	require.Contains(t, err.Error(), blockHash.Hex())
+
+	// error on unknown block
+	unknownHash := common.HexToHash("0xffffffff")
+	err = acc.AssertRoot(unknownHash, state.Root)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "no accumulated state")
+}
+
 // TestAccumulator_DeleteIsIdempotent
 func TestAccumulator_DeleteIsIdempotent(t *testing.T) {
 	acc := NewAccumulator()

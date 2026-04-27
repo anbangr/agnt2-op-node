@@ -1,6 +1,7 @@
 package agnt2utils
 
 import (
+	"fmt"
 	"sync"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -102,6 +103,23 @@ func (a *Accumulator) Len() int {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
 	return len(a.states)
+}
+
+// AssertRoot checks that the accumulated MMR root for blockHash matches
+// headerRoot (the InteractionRoot field from the block header as set by
+// op-geth's FoldInteractionRoot). Returns nil if they match; returns a
+// descriptive error if blockHash is unknown or if the roots differ.
+// Pure read — does not modify any accumulator state.
+func (a *Accumulator) AssertRoot(blockHash common.Hash, headerRoot common.Hash) error {
+	state, ok := a.Get(blockHash)
+	if !ok {
+		return fmt.Errorf("agnt2: AssertRoot: no accumulated state for block %s", blockHash.Hex())
+	}
+	if state.Root != headerRoot {
+		return fmt.Errorf("agnt2: AssertRoot: root mismatch for block %s: accumulated=%s header=%s",
+			blockHash.Hex(), state.Root.Hex(), headerRoot.Hex())
+	}
+	return nil
 }
 
 // AppendLeavesToParent computes the next AccumulatorState by folding the
