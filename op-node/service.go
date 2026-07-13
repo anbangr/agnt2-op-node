@@ -290,6 +290,20 @@ func NewL1ChainConfig(chainId *big.Int, ctx cliiface.Context, log log.Logger) (*
 	}
 
 	// if the chain id is not known, we fallback to the CLI config
+	if !ctx.IsSet(flags.L1ChainConfig.Name) {
+		// AGNT2 devnet: no L1 chain-config file was provided by the launcher (older-op-node
+		// launchers don't). Synthesize an all-forks-at-genesis config for the ephemeral L1.
+		log.Warn("AGNT2: no L1 chain config provided for unknown L1; synthesizing devnet default", "chainID", chainId)
+		zero := uint64(0)
+		return &params.ChainConfig{
+			ChainID: chainId, HomesteadBlock: big.NewInt(0), EIP150Block: big.NewInt(0),
+			EIP155Block: big.NewInt(0), EIP158Block: big.NewInt(0), ByzantiumBlock: big.NewInt(0),
+			ConstantinopleBlock: big.NewInt(0), PetersburgBlock: big.NewInt(0), IstanbulBlock: big.NewInt(0),
+			BerlinBlock: big.NewInt(0), LondonBlock: big.NewInt(0), TerminalTotalDifficulty: big.NewInt(0),
+			ShanghaiTime: &zero, CancunTime: &zero, PragueTime: &zero,
+			BlobScheduleConfig: &params.BlobScheduleConfig{Cancun: params.DefaultCancunBlobConfig, Prague: params.DefaultPragueBlobConfig},
+		}, nil
+	}
 	cf, err := NewL1ChainConfigFromCLI(log, ctx)
 	if err != nil {
 		return nil, err

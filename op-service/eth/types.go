@@ -268,6 +268,11 @@ type ExecutionPayload struct {
 	ExcessBlobGas *Uint64Quantity `json:"excessBlobGas,omitempty"`
 	// Nil if not present (Bedrock, Canyon, Delta, Ecotone, Fjord, Granite, Holocene)
 	WithdrawalsRoot *common.Hash `json:"withdrawalsRoot,omitempty"`
+	// AGNT2 extensions: interaction MMR + typed-op root/count are in the block header (affect the hash).
+	InteractionRoot  *common.Hash    `json:"interactionRoot,omitempty"`
+	InteractionCount *Uint64Quantity `json:"interactionCount,omitempty"`
+	TypedOpRoot      *common.Hash    `json:"typedOpRoot,omitempty"`
+	TypedOpCount     *Uint64Quantity `json:"typedOpCount,omitempty"`
 }
 
 func (p *ExecutionPayload) CheckEqual(o *ExecutionPayload) error {
@@ -421,6 +426,10 @@ func (envelope *ExecutionPayloadEnvelope) CheckBlockHash() (actual common.Hash, 
 		BlobGasUsed:      (*uint64)(payload.BlobGasUsed),
 		ExcessBlobGas:    (*uint64)(payload.ExcessBlobGas),
 		ParentBeaconRoot: envelope.ParentBeaconBlockRoot,
+		InteractionRoot:  payload.InteractionRoot,
+		InteractionCount: (*uint64)(payload.InteractionCount),
+		TypedOpRoot:      payload.TypedOpRoot,
+		TypedOpCount:     (*uint64)(payload.TypedOpCount),
 	}
 
 	if payload.WithdrawalsRoot != nil { // Isthmus
@@ -482,6 +491,12 @@ func BlockAsPayload(bl *types.Block, config *params.ChainConfig) (*ExecutionPayl
 	if config.IsIsthmus(uint64(payload.Timestamp)) {
 		payload.WithdrawalsRoot = bl.Header().WithdrawalsHash
 	}
+	// AGNT2: carry interaction/typed-op header fields into the payload for the Engine-API round-trip.
+	h := bl.Header()
+	payload.InteractionRoot = h.InteractionRoot
+	if c := h.InteractionCount; c != nil { v := Uint64Quantity(*c); payload.InteractionCount = &v }
+	payload.TypedOpRoot = h.TypedOpRoot
+	if c := h.TypedOpCount; c != nil { v := Uint64Quantity(*c); payload.TypedOpCount = &v }
 
 	return payload, nil
 }
