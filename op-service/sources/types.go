@@ -65,6 +65,16 @@ type RPCHeader struct {
 	// RequestsHash was added by EIP-7685 and is ignored in legacy headers.
 	RequestsHash *common.Hash `json:"requestsHash,omitempty" rlp:"optional"`
 
+	// AGNT2 typed-consensus header fields (part of the block hash on post-Isthmus
+	// AGNT2 blocks). These MUST be carried so CreateGethHeader reconstructs a header
+	// that hashes identically to op-geth's; otherwise the batcher's block-lineage
+	// check (channelManager.AddL2Block: tip == block.ParentHash) mis-computes the
+	// hash of full/post-fork blocks and stalls with ErrReorg.
+	InteractionRoot  *common.Hash    `json:"interactionRoot,omitempty" rlp:"optional"`
+	InteractionCount *hexutil.Uint64 `json:"interactionCount,omitempty" rlp:"optional"`
+	TypedOpRoot      *common.Hash    `json:"typedOpRoot,omitempty" rlp:"optional"`
+	TypedOpCount     *hexutil.Uint64 `json:"typedOpCount,omitempty" rlp:"optional"`
+
 	// untrusted info included by RPC, may have to be checked
 	Hash common.Hash `json:"hash"`
 }
@@ -122,6 +132,11 @@ func (hdr *RPCHeader) CreateGethHeader() *types.Header {
 		ParentBeaconRoot: hdr.ParentBeaconRoot,
 		// Prague
 		RequestsHash: hdr.RequestsHash,
+		// AGNT2 typed-consensus fields (part of the block hash on post-Isthmus blocks)
+		InteractionRoot:  hdr.InteractionRoot,
+		InteractionCount: (*uint64)(hdr.InteractionCount),
+		TypedOpRoot:      hdr.TypedOpRoot,
+		TypedOpCount:     (*uint64)(hdr.TypedOpCount),
 	}
 }
 
