@@ -60,7 +60,7 @@ func TestSequencerFailover_Partition_MinorityHaltsNoForkOnHeal(t *testing.T) {
 		}
 	}
 
-	sys, conductors, cleanup := setupSequencerFailoverTestWithTransports(t, transports)
+	sys, conductors, cleanup := setupSequencerFailoverTestWithTransports(t, transports, false)
 	defer cleanup()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Minute)

@@ -23,6 +23,7 @@ import (
 
 	ds "github.com/ipfs/go-datastore"
 	dsSync "github.com/ipfs/go-datastore/sync"
+	libp2p "github.com/libp2p/go-libp2p"
 	ic "github.com/libp2p/go-libp2p/core/crypto"
 	"github.com/libp2p/go-libp2p/core/host"
 	"github.com/libp2p/go-libp2p/core/peer"
@@ -317,6 +318,13 @@ type SystemConfig struct {
 
 	// Enables req-resp sync in the P2P nodes
 	P2PReqRespSync bool
+
+	// RealP2P, when true, wires each node's op-node p2p over REAL libp2p TCP (statically
+	// peered per P2PTopology, insecure transport + yamux, no discovery) instead of the
+	// in-process Mocknet. This lets a partition test cut real TCP sockets with iptables on
+	// Linux (WS1 slice 3b). Default false leaves the Mocknet path unchanged for every
+	// existing test.
+	RealP2P bool
 
 	// If the proposer can make proposals for L2 blocks derived from L1 blocks which are not finalized on L1 yet.
 	NonFinalizedProposals bool
@@ -823,7 +831,17 @@ func (cfg SystemConfig) Start(t *testing.T, startOpts ...StartOption) (*System, 
 	sys.Mocknet = mocknet.New()
 
 	p2pNodes := make(map[string]*p2p.Prepared)
-	if cfg.P2PTopology != nil {
+	// RealP2P (WS1 slice 3b): build real libp2p TCP configs instead of Mocknet peers.
+	// Populated only when cfg.RealP2P is set; the Mocknet block below is then skipped.
+	var realP2P map[string]p2p.SetupP2P
+	if cfg.RealP2P && cfg.P2PTopology != nil {
+		var err error
+		realP2P, err = buildRealP2PConfigs(cfg)
+		if err != nil {
+			return nil, fmt.Errorf("failed to build real p2p configs: %w", err)
+		}
+	}
+	if cfg.P2PTopology != nil && !cfg.RealP2P {
 		// create the peer if it doesn't exist yet.
 		initHostMaybe := func(name string) (*p2p.Prepared, error) {
 			if p, ok := p2pNodes[name]; ok {
@@ -884,7 +902,14 @@ func (cfg SystemConfig) Start(t *testing.T, startOpts ...StartOption) (*System, 
 		}
 		c.L1ChainConfig = l1Genesis.Config
 
-		if p, ok := p2pNodes[name]; ok {
+		if cfg.RealP2P {
+			if s, ok := realP2P[name]; ok {
+				c.P2P = s
+				if c.Driver.SequencerEnabled && c.P2PSigner == nil {
+					c.P2PSigner = &p2p.PreparedSigner{Signer: opsigner.NewLocalSigner(cfg.Secrets.SequencerP2P)}
+				}
+			}
+		} else if p, ok := p2pNodes[name]; ok {
 			c.P2P = p
 
 			if c.Driver.SequencerEnabled && c.P2PSigner == nil {
@@ -907,10 +932,12 @@ func (cfg SystemConfig) Start(t *testing.T, startOpts ...StartOption) (*System, 
 		}
 	}
 
-	if cfg.P2PTopology != nil {
+	if cfg.P2PTopology != nil && !cfg.RealP2P {
 		// We only set up the connections after starting the actual nodes,
 		// so GossipSub and other p2p protocols can be started before the connections go live.
 		// This way protocol negotiation happens correctly.
+		// (RealP2P dials its StaticPeers automatically when each op-node starts, so no
+		// explicit Mocknet connect step is needed.)
 		for k, vs := range cfg.P2PTopology {
 			peerA := p2pNodes[k]
 			for _, v := range vs {
@@ -923,6 +950,32 @@ func (cfg SystemConfig) Start(t *testing.T, startOpts ...StartOption) (*System, 
 					if _, err := sys.Mocknet.ConnectPeers(peerA.HostP2P.ID(), peerB.HostP2P.ID()); err != nil {
 						return nil, fmt.Errorf("failed to setup mocknet connection between %s and %s", k, v)
 					}
+				}
+			}
+		}
+	}
+
+	if cfg.P2PTopology != nil && cfg.RealP2P {
+		// Explicitly connect the real libp2p hosts now that every node is listening. The
+		// per-node StaticPeers dials fire at node-start time and race against sequential
+		// startup (early nodes dial later ones before they listen -> connection refused),
+		// which can leave a node below the conductor's min-peer-count. Connecting here, after
+		// all hosts are up, forms the full topology deterministically.
+		for k, vs := range cfg.P2PTopology {
+			npA := sys.RollupNodes[k].P2P()
+			if npA == nil {
+				continue
+			}
+			hostA := npA.Host()
+			for _, v := range vs {
+				v = strings.TrimPrefix(v, "~")
+				npB := sys.RollupNodes[v].P2P()
+				if npB == nil {
+					continue
+				}
+				hostB := npB.Host()
+				if err := hostA.Connect(context.Background(), peer.AddrInfo{ID: hostB.ID(), Addrs: hostB.Addrs()}); err != nil {
+					return nil, fmt.Errorf("failed to connect real p2p host %s -> %s: %w", k, v, err)
 				}
 			}
 		}
@@ -1043,6 +1096,92 @@ func (cfg SystemConfig) Start(t *testing.T, startOpts ...StartOption) (*System, 
 
 // IP6 range that gets blackholed (in case our traffic ever makes it out onto
 // the internet).
+// buildRealP2PConfigs constructs a real libp2p p2p.Config for every node named in the
+// P2PTopology, statically peered to that node's topology neighbours over real TCP loopback.
+// Used only when SystemConfig.RealP2P is set (WS1 slice 3b); the default path uses Mocknet.
+// Each node gets a fresh secp256k1 identity, a fixed 127.0.0.1 TCP port (so a partition test
+// knows exactly which port to iptables), insecure transport + yamux, and no discovery.
+func buildRealP2PConfigs(cfg SystemConfig) (map[string]p2p.SetupP2P, error) {
+	// Collect and sort the unique node names so port assignment is deterministic.
+	nameSet := make(map[string]struct{})
+	for k, vs := range cfg.P2PTopology {
+		nameSet[k] = struct{}{}
+		for _, v := range vs {
+			nameSet[strings.TrimPrefix(v, "~")] = struct{}{}
+		}
+	}
+	names := make([]string, 0, len(nameSet))
+	for n := range nameSet {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+
+	type peerInfo struct {
+		priv  *ic.Secp256k1PrivateKey
+		port  uint16
+		maddr ma.Multiaddr
+	}
+	const basePort = 13300
+	info := make(map[string]peerInfo, len(names))
+	for i, n := range names {
+		pk, _, err := ic.GenerateSecp256k1Key(rand.Reader)
+		if err != nil {
+			return nil, fmt.Errorf("real-p2p: gen key for %s: %w", n, err)
+		}
+		priv, ok := pk.(*ic.Secp256k1PrivateKey)
+		if !ok {
+			return nil, fmt.Errorf("real-p2p: unexpected key type for %s", n)
+		}
+		id, err := peer.IDFromPublicKey(pk.GetPublic())
+		if err != nil {
+			return nil, fmt.Errorf("real-p2p: peer id for %s: %w", n, err)
+		}
+		port := uint16(basePort + i)
+		maddr, err := ma.NewMultiaddr(fmt.Sprintf("/ip4/127.0.0.1/tcp/%d/p2p/%s", port, id.String()))
+		if err != nil {
+			return nil, fmt.Errorf("real-p2p: multiaddr for %s: %w", n, err)
+		}
+		info[n] = peerInfo{priv: priv, port: port, maddr: maddr}
+	}
+
+	out := make(map[string]p2p.SetupP2P, len(names))
+	for _, n := range names {
+		me := info[n]
+		out[n] = &p2p.Config{
+			Priv:                me.priv,
+			DisableP2P:          false,
+			NoDiscovery:         true,
+			ListenIP:            net.IP{127, 0, 0, 1},
+			ListenTCPPort:       me.port,
+			// StaticPeers is intentionally nil. Startup static dials race sequential node
+			// startup; the failed attempts leave a dial-backoff that then blocks the explicit
+			// post-start connect. e2esys instead connects the real hosts explicitly once every
+			// node is listening (the RealP2P block after the node loop), mirroring Mocknet.
+			StaticPeers:         nil,
+			HostMux:             []libp2p.Option{p2p.YamuxC()},
+			NoTransportSecurity: true,
+			PeersLo:             1,
+			PeersHi:             10,
+			PeersGrace:          10 * time.Second,
+			NAT:                 false,
+			UserAgent:           "agnt2-cluster",
+			TimeoutNegotiation:  2 * time.Second,
+			TimeoutAccept:       2 * time.Second,
+			TimeoutDial:         2 * time.Second,
+			Store:               dsSync.MutexWrap(ds.NewMapDatastore()),
+			EnableReqRespSync:   cfg.P2PReqRespSync,
+			// GossipSub mesh params: op-node's Config.Check() rejects a zero MeshD, and a real
+			// host runs full gossip, so use the standard op-node defaults.
+			MeshD:                    p2p.DefaultMeshD,
+			MeshDLo:                  p2p.DefaultMeshDlo,
+			MeshDHi:                  p2p.DefaultMeshDhi,
+			MeshDLazy:                p2p.DefaultMeshDlazy,
+			GossipTimestampThreshold: 20 * time.Second,
+		}
+	}
+	return out, nil
+}
+
 var blackholeIP6 = net.ParseIP("100::")
 
 // mocknet doesn't allow us to add a peerstore without fully creating the peer ourselves

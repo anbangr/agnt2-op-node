@@ -63,7 +63,7 @@ func (c *conductor) RPCEndpoint() string {
 }
 
 func setupSequencerFailoverTest(t *testing.T) (*e2esys.System, map[string]*conductor, func()) {
-	return setupSequencerFailoverTestWithTransports(t, nil)
+	return setupSequencerFailoverTestWithTransports(t, nil, false)
 }
 
 // setupSequencerFailoverTestWithTransports is setupSequencerFailoverTest with an
@@ -72,11 +72,11 @@ func setupSequencerFailoverTest(t *testing.T) (*e2esys.System, map[string]*condu
 // each conductor uses transports[serverID] (a test-only in-memory transport),
 // which is what the partition test uses to inject a real, heal-able network split
 // between a chosen minority and the majority.
-func setupSequencerFailoverTestWithTransports(t *testing.T, transports map[string]raft.Transport) (*e2esys.System, map[string]*conductor, func()) {
+func setupSequencerFailoverTestWithTransports(t *testing.T, transports map[string]raft.Transport, realP2P bool) (*e2esys.System, map[string]*conductor, func()) {
 	op_e2e.InitParallel(t)
 	ctx := context.Background()
 
-	sys, conductors := setupHAInfra(t, ctx, transports)
+	sys, conductors := setupHAInfra(t, ctx, transports, realP2P)
 
 	// form a cluster
 	c1 := conductors[Sequencer1Name]
@@ -148,7 +148,7 @@ func setupSequencerFailoverTestWithTransports(t *testing.T, transports map[strin
 	}
 }
 
-func setupHAInfra(t *testing.T, ctx context.Context, transports map[string]raft.Transport) (*e2esys.System, map[string]*conductor) {
+func setupHAInfra(t *testing.T, ctx context.Context, transports map[string]raft.Transport, realP2P bool) (*e2esys.System, map[string]*conductor) {
 	startTime := time.Now()
 	defer func() {
 		t.Logf("setupHAInfra took %s\n", time.Since(startTime))
@@ -178,7 +178,7 @@ func setupHAInfra(t *testing.T, ctx context.Context, transports map[string]raft.
 	}
 
 	// 3 sequencers, 1 verifier, 1 active sequencer.
-	cfg := sequencerFailoverSystemConfig(t, conductorEndpointFn)
+	cfg := sequencerFailoverSystemConfig(t, conductorEndpointFn, realP2P)
 
 	// sys is configured to close itself on test cleanup.
 	sys, err := cfg.Start(t)
@@ -334,8 +334,9 @@ func setupBatcher(t *testing.T, sys *e2esys.System, conductors map[string]*condu
 	sys.BatchSubmitter = batcher
 }
 
-func sequencerFailoverSystemConfig(t *testing.T, conductorRPCEndpoints func(ctx context.Context, name string) (string, error)) e2esys.SystemConfig {
+func sequencerFailoverSystemConfig(t *testing.T, conductorRPCEndpoints func(ctx context.Context, name string) (string, error), realP2P bool) e2esys.SystemConfig {
 	cfg := e2esys.EcotoneSystemConfig(t, new(hexutil.Uint64))
+	cfg.RealP2P = realP2P
 	delete(cfg.Nodes, "sequencer")
 	cfg.Nodes[Sequencer1Name] = sequencerCfg(func(ctx context.Context) (string, error) {
 		return conductorRPCEndpoints(ctx, Sequencer1Name)
