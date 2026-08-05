@@ -12,6 +12,7 @@ import (
 	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/ethereum/go-ethereum/log"
 	"github.com/ethereum/go-ethereum/rpc"
+	"github.com/hashicorp/raft"
 
 	bss "github.com/ethereum-optimism/optimism/op-batcher/batcher"
 	batcherFlags "github.com/ethereum-optimism/optimism/op-batcher/flags"
@@ -62,10 +63,20 @@ func (c *conductor) RPCEndpoint() string {
 }
 
 func setupSequencerFailoverTest(t *testing.T) (*e2esys.System, map[string]*conductor, func()) {
+	return setupSequencerFailoverTestWithTransports(t, nil)
+}
+
+// setupSequencerFailoverTestWithTransports is setupSequencerFailoverTest with an
+// optional per-server raft transport override. When transports is nil, every
+// conductor uses the production TCP transport (unchanged behaviour). When set,
+// each conductor uses transports[serverID] (a test-only in-memory transport),
+// which is what the partition test uses to inject a real, heal-able network split
+// between a chosen minority and the majority.
+func setupSequencerFailoverTestWithTransports(t *testing.T, transports map[string]raft.Transport) (*e2esys.System, map[string]*conductor, func()) {
 	op_e2e.InitParallel(t)
 	ctx := context.Background()
 
-	sys, conductors := setupHAInfra(t, ctx)
+	sys, conductors := setupHAInfra(t, ctx, transports)
 
 	// form a cluster
 	c1 := conductors[Sequencer1Name]
@@ -137,7 +148,7 @@ func setupSequencerFailoverTest(t *testing.T) (*e2esys.System, map[string]*condu
 	}
 }
 
-func setupHAInfra(t *testing.T, ctx context.Context) (*e2esys.System, map[string]*conductor) {
+func setupHAInfra(t *testing.T, ctx context.Context, transports map[string]raft.Transport) (*e2esys.System, map[string]*conductor) {
 	startTime := time.Now()
 	defer func() {
 		t.Logf("setupHAInfra took %s\n", time.Since(startTime))
@@ -191,7 +202,7 @@ func setupHAInfra(t *testing.T, ctx context.Context) (*e2esys.System, map[string
 		nodePRC := sys.RollupNodes[cfg.name].UserRPC().RPC()
 		engineRPC := sys.EthInstances[cfg.name].UserRPC().RPC()
 
-		conduc, err := setupConductor(t, cfg.name, t.TempDir(), nodePRC, engineRPC, cfg.bootstrap, cfg.paused, *sys.RollupConfig)
+		conduc, err := setupConductor(t, cfg.name, t.TempDir(), nodePRC, engineRPC, cfg.bootstrap, cfg.paused, *sys.RollupConfig, transports[cfg.name])
 		require.NoError(t, err, "failed to set up conductor %s", cfg.name)
 		out[cfg.name] = conduc
 		// Signal that the conductor RPC endpoint is ready
@@ -206,11 +217,13 @@ func setupConductor(
 	serverID, dir, nodeRPC, engineRPC string,
 	bootstrap bool, paused bool,
 	rollupCfg rollup.Config,
+	transport raft.Transport,
 ) (*conductor, error) {
 	cfg := con.Config{
 		ConsensusAddr:           localhost,
 		ConsensusPort:           0,  // let the system select a port, avoid conflicts
 		ConsensusAdvertisedAddr: "", // use the local address we bind to
+		TransportOverride:       transport, // TEST-ONLY: nil => production TCP transport
 
 		RaftServerID:           serverID,
 		RaftStorageDir:         dir,

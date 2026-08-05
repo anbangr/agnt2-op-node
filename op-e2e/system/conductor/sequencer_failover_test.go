@@ -108,6 +108,7 @@ func TestSequencerFailover_ConductorRPC(t *testing.T) {
 			false,
 			true,
 			*sys.RollupConfig,
+			nil, // production TCP transport
 		)
 	})
 	require.NoError(t, err)

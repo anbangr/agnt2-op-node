@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/ethereum/go-ethereum/log"
+	"github.com/hashicorp/raft"
 	"github.com/urfave/cli/v2"
 
 	"github.com/ethereum-optimism/optimism/op-conductor/flags"
@@ -55,6 +56,10 @@ type Config struct {
 	// RaftLeaderLeaseTimeout is the timeout for leader lease.
 	// If the leader reaches this timeout without contacts to followers, it resigns.
 	RaftLeaderLeaseTimeout time.Duration
+
+	// TransportOverride, when non-nil, replaces the default TCP raft transport.
+	// TEST-ONLY seam (e.g. an in-memory transport for partition tests); nil in production.
+	TransportOverride raft.Transport
 
 	// NodeRPC is the HTTP provider URL for op-node.
 	NodeRPC string
