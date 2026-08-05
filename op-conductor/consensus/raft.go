@@ -29,10 +29,15 @@ type RaftConsensus struct {
 	serverID raft.ServerID
 	r        *raft.Raft
 
-	transport *raft.NetworkTransport
+	transport raft.Transport
 	// advertisedAddr is the host & port to contact this server.
 	// If empty, the address of the transport should be used instead.
 	advertisedAddr string
+
+	// skipConnCheck disables the TCP dial pre-check in AddVoter/AddNonVoter.
+	// It is set only when a non-TCP transport override is injected (test-only,
+	// e.g. an in-memory transport for partition tests); false in production.
+	skipConnCheck bool
 
 	unsafeTracker *unsafeHeadTracker
 }
@@ -61,6 +66,12 @@ type RaftConsensusConfig struct {
 	TrailingLogs       uint64
 	HeartbeatTimeout   time.Duration
 	LeaderLeaseTimeout time.Duration
+
+	// TransportOverride, when non-nil, replaces the default TCP raft transport.
+	// This is a TEST-ONLY seam (e.g. an in-memory transport for partition tests);
+	// it is nil in all production configurations, leaving the TCP transport path
+	// (and its checkTCPPortOpen guards) unchanged in production.
+	TransportOverride raft.Transport
 }
 
 // checkTCPPortOpen attempts to connect to the specified address and returns an error if the connection fails.
@@ -114,31 +125,42 @@ func NewRaftConsensus(log log.Logger, cfg *RaftConsensusConfig) (*RaftConsensus,
 		return nil, fmt.Errorf(`raft.NewFileSnapshotStore(%q): %w`, baseDir, err)
 	}
 
-	var advertiseAddr net.Addr
-	if cfg.AdvertisedAddr == "" {
-		log.Warn("No advertised address specified. Advertising local address.")
+	var transport raft.Transport
+	skipConnCheck := cfg.TransportOverride != nil
+	if cfg.TransportOverride != nil {
+		// TEST-ONLY: use the injected transport (e.g. an in-memory transport for
+		// partition tests) instead of binding a TCP listener. Production configs
+		// never set TransportOverride, so the TCP path below is unchanged in prod.
+		transport = cfg.TransportOverride
+		log.Warn("Using injected raft transport override (test-only)", "addr", transport.LocalAddr())
 	} else {
-		x, err := net.ResolveTCPAddr("tcp", string(cfg.AdvertisedAddr))
-		if err != nil {
-			return nil, fmt.Errorf("failed to resolve advertised TCP address %q: %w", string(cfg.AdvertisedAddr), err)
+		var advertiseAddr net.Addr
+		if cfg.AdvertisedAddr == "" {
+			log.Warn("No advertised address specified. Advertising local address.")
+		} else {
+			x, err := net.ResolveTCPAddr("tcp", string(cfg.AdvertisedAddr))
+			if err != nil {
+				return nil, fmt.Errorf("failed to resolve advertised TCP address %q: %w", string(cfg.AdvertisedAddr), err)
+			}
+			advertiseAddr = x
+			log.Info("Resolved advertising address", "adAddr", cfg.AdvertisedAddr,
+				"adIP", x.IP, "adPort", x.Port, "adZone", x.Zone)
 		}
-		advertiseAddr = x
-		log.Info("Resolved advertising address", "adAddr", cfg.AdvertisedAddr,
-			"adIP", x.IP, "adPort", x.Port, "adZone", x.Zone)
+
+		bindAddr := fmt.Sprintf("%s:%d", cfg.ListenAddr, cfg.ListenPort)
+		log.Info("Binding raft server to network transport", "listenAddr", bindAddr)
+
+		maxConnPool := 10
+		timeout := 5 * time.Second
+
+		// When advertiseAddr == nil, the transport will use the local address that it is bound to.
+		tcpTransport, terr := raft.NewTCPTransportWithLogger(bindAddr, advertiseAddr, maxConnPool, timeout, rc.Logger)
+		if terr != nil {
+			return nil, fmt.Errorf("failed to create raft tcp transport: %w", terr)
+		}
+		transport = tcpTransport
+		log.Info("Raft server network transport is up", "addr", transport.LocalAddr())
 	}
-
-	bindAddr := fmt.Sprintf("%s:%d", cfg.ListenAddr, cfg.ListenPort)
-	log.Info("Binding raft server to network transport", "listenAddr", bindAddr)
-
-	maxConnPool := 10
-	timeout := 5 * time.Second
-
-	// When advertiseAddr == nil, the transport will use the local address that it is bound to.
-	transport, err := raft.NewTCPTransportWithLogger(bindAddr, advertiseAddr, maxConnPool, timeout, rc.Logger)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create raft tcp transport: %w", err)
-	}
-	log.Info("Raft server network transport is up", "addr", transport.LocalAddr())
 
 	fsm := NewUnsafeHeadTracker(log)
 
@@ -187,6 +209,7 @@ func NewRaftConsensus(log log.Logger, cfg *RaftConsensusConfig) (*RaftConsensus,
 		unsafeTracker: fsm,
 		rollupCfg:     cfg.RollupCfg,
 		transport:     transport,
+		skipConnCheck: skipConnCheck,
 	}, err
 }
 
@@ -202,9 +225,11 @@ func (rc *RaftConsensus) Addr() string {
 
 // AddNonVoter implements Consensus, it tries to add a non-voting member into the cluster.
 func (rc *RaftConsensus) AddNonVoter(id string, addr string, version uint64) error {
-	if err := checkTCPPortOpen(addr); err != nil {
-		rc.log.Error("connection test to member addr failed", "id", id, "addr", addr, "err", err)
-		return err
+	if !rc.skipConnCheck {
+		if err := checkTCPPortOpen(addr); err != nil {
+			rc.log.Error("connection test to member addr failed", "id", id, "addr", addr, "err", err)
+			return err
+		}
 	}
 	if err := rc.r.AddNonvoter(raft.ServerID(id), raft.ServerAddress(addr), version, defaultTimeout).Error(); err != nil {
 		rc.log.Error("failed to add non-voter", "id", id, "addr", addr, "version", version, "err", err)
@@ -215,9 +240,11 @@ func (rc *RaftConsensus) AddNonVoter(id string, addr string, version uint64) err
 
 // AddVoter implements Consensus, it tries to add a voting member into the cluster.
 func (rc *RaftConsensus) AddVoter(id string, addr string, version uint64) error {
-	if err := checkTCPPortOpen(addr); err != nil {
-		rc.log.Error("connection test to member addr failed", "id", id, "addr", addr, "err", err)
-		return err
+	if !rc.skipConnCheck {
+		if err := checkTCPPortOpen(addr); err != nil {
+			rc.log.Error("connection test to member addr failed", "id", id, "addr", addr, "err", err)
+			return err
+		}
 	}
 	if err := rc.r.AddVoter(raft.ServerID(id), raft.ServerAddress(addr), version, defaultTimeout).Error(); err != nil {
 		rc.log.Error("failed to add voter", "id", id, "addr", addr, "version", version, "err", err)
