@@ -1097,10 +1097,11 @@ func (cfg SystemConfig) Start(t *testing.T, startOpts ...StartOption) (*System, 
 // IP6 range that gets blackholed (in case our traffic ever makes it out onto
 // the internet).
 // buildRealP2PConfigs constructs a real libp2p p2p.Config for every node named in the
-// P2PTopology, statically peered to that node's topology neighbours over real TCP loopback.
+// P2PTopology, connected over real TCP loopback (via the explicit post-start connect below).
 // Used only when SystemConfig.RealP2P is set (WS1 slice 3b); the default path uses Mocknet.
-// Each node gets a fresh secp256k1 identity, a fixed 127.0.0.1 TCP port (so a partition test
-// knows exactly which port to iptables), insecure transport + yamux, and no discovery.
+// Each node gets a fresh secp256k1 identity and binds to a DISTINCT 127.0.0.x IP (RealP2PNodeIP)
+// with a fixed port (RealP2PNodeP2PPort), so a partition test can iptables a node BY IP;
+// insecure transport + yamux, and no discovery.
 const realP2PBasePort = 13300
 
 // realP2PSortedNames returns the unique node names in the topology, sorted, so per-node
