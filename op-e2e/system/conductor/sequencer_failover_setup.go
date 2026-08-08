@@ -63,7 +63,7 @@ func (c *conductor) RPCEndpoint() string {
 }
 
 func setupSequencerFailoverTest(t *testing.T) (*e2esys.System, map[string]*conductor, func()) {
-	return setupSequencerFailoverTestWithTransports(t, nil)
+	return setupSequencerFailoverTestWithTransports(t, nil, false)
 }
 
 // setupSequencerFailoverTestWithTransports is setupSequencerFailoverTest with an
@@ -72,11 +72,11 @@ func setupSequencerFailoverTest(t *testing.T) (*e2esys.System, map[string]*condu
 // each conductor uses transports[serverID] (a test-only in-memory transport),
 // which is what the partition test uses to inject a real, heal-able network split
 // between a chosen minority and the majority.
-func setupSequencerFailoverTestWithTransports(t *testing.T, transports map[string]raft.Transport) (*e2esys.System, map[string]*conductor, func()) {
+func setupSequencerFailoverTestWithTransports(t *testing.T, transports map[string]raft.Transport, realP2P bool) (*e2esys.System, map[string]*conductor, func()) {
 	op_e2e.InitParallel(t)
 	ctx := context.Background()
 
-	sys, conductors := setupHAInfra(t, ctx, transports)
+	sys, conductors := setupHAInfra(t, ctx, transports, realP2P)
 
 	// form a cluster
 	c1 := conductors[Sequencer1Name]
@@ -148,7 +148,7 @@ func setupSequencerFailoverTestWithTransports(t *testing.T, transports map[strin
 	}
 }
 
-func setupHAInfra(t *testing.T, ctx context.Context, transports map[string]raft.Transport) (*e2esys.System, map[string]*conductor) {
+func setupHAInfra(t *testing.T, ctx context.Context, transports map[string]raft.Transport, realP2P bool) (*e2esys.System, map[string]*conductor) {
 	startTime := time.Now()
 	defer func() {
 		t.Logf("setupHAInfra took %s\n", time.Since(startTime))
@@ -178,7 +178,7 @@ func setupHAInfra(t *testing.T, ctx context.Context, transports map[string]raft.
 	}
 
 	// 3 sequencers, 1 verifier, 1 active sequencer.
-	cfg := sequencerFailoverSystemConfig(t, conductorEndpointFn)
+	cfg := sequencerFailoverSystemConfig(t, conductorEndpointFn, realP2P)
 
 	// sys is configured to close itself on test cleanup.
 	sys, err := cfg.Start(t)
@@ -197,12 +197,19 @@ func setupHAInfra(t *testing.T, ctx context.Context, transports map[string]raft.
 		{Sequencer2Name, false, true},
 		{Sequencer3Name, false, true},
 	}
+	// Under RealP2P each node's raft consensus binds to its distinct loopback IP (matching its
+	// p2p bind IP), so a Linux iptables partition can cut a node's raft + p2p traffic by IP.
+	sysTopology := cfg.P2PTopology
 	for _, cfg := range conductorCfgs {
 		cfg := cfg
 		nodePRC := sys.RollupNodes[cfg.name].UserRPC().RPC()
 		engineRPC := sys.EthInstances[cfg.name].UserRPC().RPC()
 
-		conduc, err := setupConductor(t, cfg.name, t.TempDir(), nodePRC, engineRPC, cfg.bootstrap, cfg.paused, *sys.RollupConfig, transports[cfg.name])
+		consensusAddr := localhost
+		if realP2P {
+			consensusAddr = e2esys.RealP2PNodeIP(sysTopology, cfg.name).String()
+		}
+		conduc, err := setupConductor(t, cfg.name, t.TempDir(), nodePRC, engineRPC, cfg.bootstrap, cfg.paused, *sys.RollupConfig, transports[cfg.name], consensusAddr)
 		require.NoError(t, err, "failed to set up conductor %s", cfg.name)
 		out[cfg.name] = conduc
 		// Signal that the conductor RPC endpoint is ready
@@ -218,9 +225,10 @@ func setupConductor(
 	bootstrap bool, paused bool,
 	rollupCfg rollup.Config,
 	transport raft.Transport,
+	consensusAddr string,
 ) (*conductor, error) {
 	cfg := con.Config{
-		ConsensusAddr:           localhost,
+		ConsensusAddr:           consensusAddr,
 		ConsensusPort:           0,  // let the system select a port, avoid conflicts
 		ConsensusAdvertisedAddr: "", // use the local address we bind to
 		TransportOverride:       transport, // TEST-ONLY: nil => production TCP transport
@@ -334,8 +342,9 @@ func setupBatcher(t *testing.T, sys *e2esys.System, conductors map[string]*condu
 	sys.BatchSubmitter = batcher
 }
 
-func sequencerFailoverSystemConfig(t *testing.T, conductorRPCEndpoints func(ctx context.Context, name string) (string, error)) e2esys.SystemConfig {
+func sequencerFailoverSystemConfig(t *testing.T, conductorRPCEndpoints func(ctx context.Context, name string) (string, error), realP2P bool) e2esys.SystemConfig {
 	cfg := e2esys.EcotoneSystemConfig(t, new(hexutil.Uint64))
+	cfg.RealP2P = realP2P
 	delete(cfg.Nodes, "sequencer")
 	cfg.Nodes[Sequencer1Name] = sequencerCfg(func(ctx context.Context) (string, error) {
 		return conductorRPCEndpoints(ctx, Sequencer1Name)
