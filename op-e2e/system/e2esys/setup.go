@@ -1101,29 +1101,62 @@ func (cfg SystemConfig) Start(t *testing.T, startOpts ...StartOption) (*System, 
 // Used only when SystemConfig.RealP2P is set (WS1 slice 3b); the default path uses Mocknet.
 // Each node gets a fresh secp256k1 identity, a fixed 127.0.0.1 TCP port (so a partition test
 // knows exactly which port to iptables), insecure transport + yamux, and no discovery.
-func buildRealP2PConfigs(cfg SystemConfig) (map[string]p2p.SetupP2P, error) {
-	// Collect and sort the unique node names so port assignment is deterministic.
-	nameSet := make(map[string]struct{})
-	for k, vs := range cfg.P2PTopology {
-		nameSet[k] = struct{}{}
+const realP2PBasePort = 13300
+
+// realP2PSortedNames returns the unique node names in the topology, sorted, so per-node
+// address assignment is deterministic and shared between buildRealP2PConfigs and any caller
+// (e.g. a Linux iptables partition test, or the conductor raft-consensus bind address) that
+// needs a node's fixed address.
+func realP2PSortedNames(topology map[string][]string) []string {
+	set := make(map[string]struct{})
+	for k, vs := range topology {
+		set[k] = struct{}{}
 		for _, v := range vs {
-			nameSet[strings.TrimPrefix(v, "~")] = struct{}{}
+			set[strings.TrimPrefix(v, "~")] = struct{}{}
 		}
 	}
-	names := make([]string, 0, len(nameSet))
-	for n := range nameSet {
+	names := make([]string, 0, len(set))
+	for n := range set {
 		names = append(names, n)
 	}
 	sort.Strings(names)
+	return names
+}
+
+// RealP2PNodeIP returns the distinct loopback IP a node's real raft + p2p sockets bind to
+// under RealP2P: 127.0.0.(2+index) by sorted topology position. Distinct per-node IPs are
+// what let a Linux iptables partition cut a node's inter-node traffic BY IP — a shared
+// 127.0.0.1 cannot be cut per-node because outbound connections use ephemeral source ports,
+// so a leader would keep replicating even with its listen ports blocked.
+func RealP2PNodeIP(topology map[string][]string, name string) net.IP {
+	for i, n := range realP2PSortedNames(topology) {
+		if n == name {
+			return net.IP{127, 0, 0, byte(2 + i)}
+		}
+	}
+	return nil
+}
+
+// RealP2PNodeP2PPort returns the fixed TCP port a node's op-node p2p binds to under RealP2P.
+func RealP2PNodeP2PPort(topology map[string][]string, name string) uint16 {
+	for i, n := range realP2PSortedNames(topology) {
+		if n == name {
+			return uint16(realP2PBasePort + i)
+		}
+	}
+	return 0
+}
+
+func buildRealP2PConfigs(cfg SystemConfig) (map[string]p2p.SetupP2P, error) {
+	names := realP2PSortedNames(cfg.P2PTopology)
 
 	type peerInfo struct {
-		priv  *ic.Secp256k1PrivateKey
-		port  uint16
-		maddr ma.Multiaddr
+		priv *ic.Secp256k1PrivateKey
+		ip   net.IP
+		port uint16
 	}
-	const basePort = 13300
 	info := make(map[string]peerInfo, len(names))
-	for i, n := range names {
+	for _, n := range names {
 		pk, _, err := ic.GenerateSecp256k1Key(rand.Reader)
 		if err != nil {
 			return nil, fmt.Errorf("real-p2p: gen key for %s: %w", n, err)
@@ -1132,16 +1165,11 @@ func buildRealP2PConfigs(cfg SystemConfig) (map[string]p2p.SetupP2P, error) {
 		if !ok {
 			return nil, fmt.Errorf("real-p2p: unexpected key type for %s", n)
 		}
-		id, err := peer.IDFromPublicKey(pk.GetPublic())
-		if err != nil {
-			return nil, fmt.Errorf("real-p2p: peer id for %s: %w", n, err)
+		info[n] = peerInfo{
+			priv: priv,
+			ip:   RealP2PNodeIP(cfg.P2PTopology, n),
+			port: RealP2PNodeP2PPort(cfg.P2PTopology, n),
 		}
-		port := uint16(basePort + i)
-		maddr, err := ma.NewMultiaddr(fmt.Sprintf("/ip4/127.0.0.1/tcp/%d/p2p/%s", port, id.String()))
-		if err != nil {
-			return nil, fmt.Errorf("real-p2p: multiaddr for %s: %w", n, err)
-		}
-		info[n] = peerInfo{priv: priv, port: port, maddr: maddr}
 	}
 
 	out := make(map[string]p2p.SetupP2P, len(names))
@@ -1151,7 +1179,7 @@ func buildRealP2PConfigs(cfg SystemConfig) (map[string]p2p.SetupP2P, error) {
 			Priv:                me.priv,
 			DisableP2P:          false,
 			NoDiscovery:         true,
-			ListenIP:            net.IP{127, 0, 0, 1},
+			ListenIP:            me.ip,
 			ListenTCPPort:       me.port,
 			// StaticPeers is intentionally nil. Startup static dials race sequential node
 			// startup; the failed attempts leave a dial-backoff that then blocks the explicit

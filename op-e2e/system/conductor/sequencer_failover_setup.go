@@ -197,12 +197,19 @@ func setupHAInfra(t *testing.T, ctx context.Context, transports map[string]raft.
 		{Sequencer2Name, false, true},
 		{Sequencer3Name, false, true},
 	}
+	// Under RealP2P each node's raft consensus binds to its distinct loopback IP (matching its
+	// p2p bind IP), so a Linux iptables partition can cut a node's raft + p2p traffic by IP.
+	sysTopology := cfg.P2PTopology
 	for _, cfg := range conductorCfgs {
 		cfg := cfg
 		nodePRC := sys.RollupNodes[cfg.name].UserRPC().RPC()
 		engineRPC := sys.EthInstances[cfg.name].UserRPC().RPC()
 
-		conduc, err := setupConductor(t, cfg.name, t.TempDir(), nodePRC, engineRPC, cfg.bootstrap, cfg.paused, *sys.RollupConfig, transports[cfg.name])
+		consensusAddr := localhost
+		if realP2P {
+			consensusAddr = e2esys.RealP2PNodeIP(sysTopology, cfg.name).String()
+		}
+		conduc, err := setupConductor(t, cfg.name, t.TempDir(), nodePRC, engineRPC, cfg.bootstrap, cfg.paused, *sys.RollupConfig, transports[cfg.name], consensusAddr)
 		require.NoError(t, err, "failed to set up conductor %s", cfg.name)
 		out[cfg.name] = conduc
 		// Signal that the conductor RPC endpoint is ready
@@ -218,9 +225,10 @@ func setupConductor(
 	bootstrap bool, paused bool,
 	rollupCfg rollup.Config,
 	transport raft.Transport,
+	consensusAddr string,
 ) (*conductor, error) {
 	cfg := con.Config{
-		ConsensusAddr:           localhost,
+		ConsensusAddr:           consensusAddr,
 		ConsensusPort:           0,  // let the system select a port, avoid conflicts
 		ConsensusAdvertisedAddr: "", // use the local address we bind to
 		TransportOverride:       transport, // TEST-ONLY: nil => production TCP transport

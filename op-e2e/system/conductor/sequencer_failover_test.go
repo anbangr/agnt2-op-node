@@ -108,7 +108,8 @@ func TestSequencerFailover_ConductorRPC(t *testing.T) {
 			false,
 			true,
 			*sys.RollupConfig,
-			nil, // production TCP transport
+			nil,       // production TCP transport
+			localhost, // Mocknet path: raft consensus on 127.0.0.1
 		)
 	})
 	require.NoError(t, err)

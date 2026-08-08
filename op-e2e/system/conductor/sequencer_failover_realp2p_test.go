@@ -2,6 +2,7 @@ package conductor
 
 import (
 	"context"
+	"runtime"
 	"testing"
 	"time"
 
@@ -21,6 +22,9 @@ import (
 // once p2p is real TCP, a Linux `iptables` cut of the real raft + p2p ports produces a genuine
 // OS-level partition (which the in-process Mocknet/InmemTransport cut of slice 3a could not).
 func TestSequencerFailover_RealP2P_Smoke(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("RealP2P binds each node to a distinct 127.0.0.x loopback IP (for iptables-by-IP partitioning), which requires Linux; skipping on " + runtime.GOOS)
+	}
 	sys, conductors, cleanup := setupSequencerFailoverTestWithTransports(t, nil, true /* realP2P */)
 	defer cleanup()
 
