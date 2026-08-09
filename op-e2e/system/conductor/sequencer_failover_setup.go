@@ -343,7 +343,7 @@ func setupBatcher(t *testing.T, sys *e2esys.System, conductors map[string]*condu
 }
 
 func sequencerFailoverSystemConfig(t *testing.T, conductorRPCEndpoints func(ctx context.Context, name string) (string, error), realP2P bool) e2esys.SystemConfig {
-	cfg := e2esys.EcotoneSystemConfig(t, new(hexutil.Uint64))
+	cfg := e2esys.IsthmusSystemConfig(t, new(hexutil.Uint64))
 	cfg.RealP2P = realP2P
 	delete(cfg.Nodes, "sequencer")
 	cfg.Nodes[Sequencer1Name] = sequencerCfg(func(ctx context.Context) (string, error) {

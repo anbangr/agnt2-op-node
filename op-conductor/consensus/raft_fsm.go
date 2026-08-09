@@ -34,11 +34,15 @@ func (t *unsafeHeadTracker) Apply(l *raft.Log) interface{} {
 	}
 
 	data := &eth.ExecutionPayloadEnvelope{}
-	// There is no good way to know which version, so try both. Start with the most recent version
-	if err := data.UnmarshalSSZ(eth.BlockV4, uint32(len(l.Data)), bytes.NewReader(l.Data)); err != nil {
-		// Try v3 if v4 fails and return an error if v3 fails
-		if err := data.UnmarshalSSZ(eth.BlockV3, uint32(len(l.Data)), bytes.NewReader(l.Data)); err != nil {
-			return err
+	// There is no good way to know which version, so try each. Start with the most recent.
+	// V5 carries the AGNT2 header extensions; without trying it first, an AGNT2-active
+	// payload decodes short and the leadership handoff fails with "bad block hash".
+	if err := data.UnmarshalSSZ(eth.BlockV5, uint32(len(l.Data)), bytes.NewReader(l.Data)); err != nil {
+		if err := data.UnmarshalSSZ(eth.BlockV4, uint32(len(l.Data)), bytes.NewReader(l.Data)); err != nil {
+			// Try v3 if v4 fails and return an error if v3 fails
+			if err := data.UnmarshalSSZ(eth.BlockV3, uint32(len(l.Data)), bytes.NewReader(l.Data)); err != nil {
+				return err
+			}
 		}
 	}
 
@@ -62,11 +66,14 @@ func (t *unsafeHeadTracker) Restore(snapshot io.ReadCloser) error {
 	}
 
 	data := &eth.ExecutionPayloadEnvelope{}
-	// There is no good way to know which version, so try both. Start with the most recent version
-	if err := data.UnmarshalSSZ(eth.BlockV4, uint32(n), bytes.NewReader(buf.Bytes())); err != nil {
-		// Try v3 if v4 fails and return an error if v3 fails
-		if err := data.UnmarshalSSZ(eth.BlockV3, uint32(n), bytes.NewReader(buf.Bytes())); err != nil {
-			return err
+	// There is no good way to know which version, so try each. Start with the most recent.
+	// V5 carries the AGNT2 header extensions (see Apply).
+	if err := data.UnmarshalSSZ(eth.BlockV5, uint32(n), bytes.NewReader(buf.Bytes())); err != nil {
+		if err := data.UnmarshalSSZ(eth.BlockV4, uint32(n), bytes.NewReader(buf.Bytes())); err != nil {
+			// Try v3 if v4 fails and return an error if v3 fails
+			if err := data.UnmarshalSSZ(eth.BlockV3, uint32(n), bytes.NewReader(buf.Bytes())); err != nil {
+				return err
+			}
 		}
 	}
 

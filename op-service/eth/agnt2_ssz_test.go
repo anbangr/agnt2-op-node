@@ -2,7 +2,6 @@ package eth
 
 import (
 	"bytes"
-	"os"
 	"testing"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -14,36 +13,21 @@ import (
 // (InteractionRoot/InteractionCount, TypedOpRoot/TypedOpCount) survive an
 // ExecutionPayload SSZ marshal -> unmarshal round-trip.
 //
-// STATUS: THIS TEST CURRENTLY FAILS — it documents a KNOWN, MEASURED DEFECT.
-// It is skipped by default so the suite stays green; run it explicitly with:
+// REGRESSION GUARD. This test was originally added RED, to document a measured defect:
+// ExecutionPayload declares the four AGNT2 fields as hash-affecting and CheckBlockHash
+// folds all four into the header it reconstructs, but the payload SSZ codec never
+// serialized them — so they were dropped in transit and the receiver recomputed a
+// DIFFERENT block hash than the producer sealed. Because op-geth stamps
+// InteractionRoot/Count on EVERY block once the AGNT2 (Isthmus) fork tag is active, no
+// block could cross op-node p2p at all: the 3-node op-conductor cluster logged "payload
+// has bad block hash" for every gossiped payload, and op-conductor's leadership handoff
+// failed the same way, so failover broke.
+// (Measured: docs/claims/evidence/agnt2-ws1-payload-ssz-defect-measured.json.)
 //
-//	AGNT2_SSZ_DEFECT_TEST=1 go test ./op-service/eth/ -run TestAGNT2ExecutionPayloadSSZRoundTrip -v
-//
-// THE DEFECT. ExecutionPayload declares the four AGNT2 fields (types.go, "AGNT2
-// extensions: interaction MMR + typed-op root/count are in the block header (affect
-// the hash)") and CheckBlockHash folds all four into the header it reconstructs to
-// verify the block hash. But the payload SSZ codec in ssz.go never serializes them:
-// blockV4FixedPart stops at WithdrawalsRoot and there is not a single reference to
-// Interaction*/TypedOp* in the file. So the fields are silently dropped in transit
-// and the receiver recomputes a DIFFERENT block hash than the producer sealed.
-//
-// CONSEQUENCE (measured, see docs/claims/evidence/agnt2-ws1-payload-ssz-defect-measured.json):
-// post-Isthmus op-geth sets InteractionRoot/Count on EVERY block (not just blocks
-// carrying typed ops), so once the AGNT2 fork tag is active NO block can cross
-// op-node p2p at all: the 3-node op-conductor cluster logs "payload has bad block
-// hash" for every gossiped payload, and op-conductor's own leadership handoff
-// (raft-stored payload -> admin_postUnsafePayload, also SSZ) fails the same way, so
-// a newly elected leader can never become active and failover breaks.
-//
-// FIX SKETCH: add a BlockV5 payload version carrying the AGNT2 fields, select it via
-// inferVersion() when InteractionRoot != nil, add a matching blocksV5 gossip topic,
-// and teach op-conductor's raft FSM to decode V5. Reserve space for TypedReexecRoot/
-// Count at the same time to avoid a second wire-format break.
+// It is now GREEN, fixed by the BlockV5 payload version in ssz.go. Keep it running by
+// default: it is the cheapest guard against a silent re-break of the block-hash
+// commitment, including an off-by-N in the fixed-part offset arithmetic.
 func TestAGNT2ExecutionPayloadSSZRoundTrip(t *testing.T) {
-	if os.Getenv("AGNT2_SSZ_DEFECT_TEST") != "1" {
-		t.Skip("documents a known unfixed defect (AGNT2 header fields dropped by the payload SSZ codec); set AGNT2_SSZ_DEFECT_TEST=1 to run")
-	}
-
 	interactionRoot := common.HexToHash("0x1111111111111111111111111111111111111111111111111111111111111111")
 	typedOpRoot := common.HexToHash("0x2222222222222222222222222222222222222222222222222222222222222222")
 	withdrawalsRoot := common.HexToHash("0x3333333333333333333333333333333333333333333333333333333333333333")
@@ -79,4 +63,44 @@ func TestAGNT2ExecutionPayloadSSZRoundTrip(t *testing.T) {
 	require.Equal(t, typedOpRoot, *got.TypedOpRoot)
 	require.Equal(t, interactionCount, *got.InteractionCount)
 	require.Equal(t, typedOpCount, *got.TypedOpCount)
+	require.Equal(t, BlockV5, payload.inferVersion(), "a payload carrying AGNT2 fields must encode as V5")
+}
+
+// TestAGNT2ExecutionPayloadSSZRoundTripNoTypedOps covers the other half of the AGNT2
+// presence rule: op-geth leaves TypedOpRoot/Count nil on blocks that carry no typed ops
+// (it only sets them when count > 0), while InteractionRoot/Count are still stamped on
+// every post-Isthmus block. Nil-ness is hash-relevant — CheckBlockHash folds these
+// pointers into the reconstructed header — so a block with no typed ops must decode back
+// with TypedOpRoot/Count STILL NIL, not as a zero-valued pointer.
+func TestAGNT2ExecutionPayloadSSZRoundTripNoTypedOps(t *testing.T) {
+	interactionRoot := common.HexToHash("0x1111111111111111111111111111111111111111111111111111111111111111")
+	withdrawalsRoot := common.HexToHash("0x3333333333333333333333333333333333333333333333333333333333333333")
+	interactionCount := Uint64Quantity(0)
+	blobGasUsed := Uint64Quantity(0)
+	excessBlobGas := Uint64Quantity(0)
+
+	payload := &ExecutionPayload{
+		BlobGasUsed:      &blobGasUsed,
+		ExcessBlobGas:    &excessBlobGas,
+		WithdrawalsRoot:  &withdrawalsRoot,
+		Withdrawals:      &types.Withdrawals{},
+		InteractionRoot:  &interactionRoot,
+		InteractionCount: &interactionCount,
+		// TypedOpRoot / TypedOpCount intentionally nil
+	}
+	require.Equal(t, BlockV5, payload.inferVersion())
+
+	var buf bytes.Buffer
+	_, err := payload.MarshalSSZ(&buf)
+	require.NoError(t, err)
+
+	var got ExecutionPayload
+	require.NoError(t, got.UnmarshalSSZ(payload.inferVersion(), uint32(buf.Len()), bytes.NewReader(buf.Bytes())))
+
+	require.NotNil(t, got.InteractionRoot)
+	require.Equal(t, interactionRoot, *got.InteractionRoot)
+	require.NotNil(t, got.InteractionCount)
+	require.Equal(t, interactionCount, *got.InteractionCount)
+	require.Nil(t, got.TypedOpRoot, "TypedOpRoot must stay nil when the block carries no typed ops (nil-ness is hash-relevant)")
+	require.Nil(t, got.TypedOpCount, "TypedOpCount must stay nil when the block carries no typed ops")
 }
