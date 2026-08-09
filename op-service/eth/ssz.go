@@ -19,6 +19,13 @@ const ( // iota is reset to 0
 	BlockV2
 	BlockV3
 	BlockV4
+	// BlockV5 is V4 plus the AGNT2 header extensions (InteractionRoot/Count,
+	// TypedOpRoot/Count). These are committed to by the block hash (see
+	// ExecutionPayload.CheckBlockHash), so they MUST be on the wire — without them a
+	// receiver recomputes a different block hash than the producer sealed and rejects
+	// every payload. op-geth sets InteractionRoot/Count on every block once the AGNT2
+	// (Optimism Isthmus) fork tag is active.
+	BlockV5
 )
 
 // ExecutionPayload and ExecutionPayloadEnvelope are the only SSZ types we have to marshal/unmarshal,
@@ -58,6 +65,12 @@ const (
 	// V3 + WithdrawalsRoot
 	blockV4FixedPart = blockV3FixedPart + 32
 
+	// V4 + InteractionRoot + InteractionCount + TypedOpRoot + TypedOpCount.
+	// All four are fixed-size and appended at the END of the fixed part, so the dynamic
+	// offsets (ExtraData / Transactions / Withdrawals), which are all derived from
+	// fixedSize, shift automatically and need no separate arithmetic.
+	blockV5FixedPart = blockV4FixedPart + 32 + 8 + 32 + 8
+
 	withdrawalSize = 8 + 8 + 20 + 8
 
 	// MAX_TRANSACTIONS_PER_PAYLOAD in consensus spec
@@ -70,23 +83,31 @@ const (
 )
 
 func (v BlockVersion) HasBlobProperties() bool {
-	return v == BlockV3 || v == BlockV4
+	return v == BlockV3 || v == BlockV4 || v == BlockV5
 }
 
 func (v BlockVersion) HasWithdrawals() bool {
-	return v == BlockV2 || v == BlockV3 || v == BlockV4
+	return v == BlockV2 || v == BlockV3 || v == BlockV4 || v == BlockV5
 }
 
 func (v BlockVersion) HasParentBeaconBlockRoot() bool {
-	return v == BlockV3 || v == BlockV4
+	return v == BlockV3 || v == BlockV4 || v == BlockV5
 }
 
 func (v BlockVersion) HasWithdrawalsRoot() bool {
-	return v == BlockV4
+	return v == BlockV4 || v == BlockV5
+}
+
+// HasAGNT2Fields reports whether the version carries the AGNT2 header extensions
+// (InteractionRoot/Count, TypedOpRoot/Count).
+func (v BlockVersion) HasAGNT2Fields() bool {
+	return v == BlockV5
 }
 
 func executionPayloadFixedPart(version BlockVersion) uint32 {
-	if version == BlockV4 {
+	if version == BlockV5 {
+		return blockV5FixedPart
+	} else if version == BlockV4 {
 		return blockV4FixedPart
 	} else if version == BlockV3 {
 		return blockV3FixedPart
@@ -98,7 +119,12 @@ func executionPayloadFixedPart(version BlockVersion) uint32 {
 }
 
 func (payload *ExecutionPayload) inferVersion() BlockVersion {
-	if payload.WithdrawalsRoot != nil && *payload.WithdrawalsRoot != types.EmptyWithdrawalsHash {
+	// Checked first: once the AGNT2 fork tag is active op-geth stamps InteractionRoot on
+	// every block, and those fields are committed to by the block hash, so a payload
+	// carrying them must be encoded as V5 or it will fail CheckBlockHash on arrival.
+	if payload.InteractionRoot != nil {
+		return BlockV5
+	} else if payload.WithdrawalsRoot != nil && *payload.WithdrawalsRoot != types.EmptyWithdrawalsHash {
 		return BlockV4
 	} else if payload.ExcessBlobGas != nil && payload.BlobGasUsed != nil {
 		return BlockV3
@@ -228,6 +254,35 @@ func (payload *ExecutionPayload) MarshalSSZ(w io.Writer) (n int, err error) {
 		}
 		copy(buf[offset:offset+32], (*payload.WithdrawalsRoot)[:])
 		offset += 32
+	}
+
+	if payloadVersion.HasAGNT2Fields() {
+		// InteractionRoot/Count are always present in V5 (op-geth stamps them on every
+		// post-Isthmus block); inferVersion only selects V5 when InteractionRoot != nil.
+		if payload.InteractionRoot == nil || payload.InteractionCount == nil {
+			return 0, errors.New("cannot encode AGNT2 payload without interaction root and count")
+		}
+		copy(buf[offset:offset+32], (*payload.InteractionRoot)[:])
+		offset += 32
+		binary.LittleEndian.PutUint64(buf[offset:offset+8], uint64(*payload.InteractionCount))
+		offset += 8
+		// TypedOpRoot/Count are optional: op-geth only sets them when the block carries
+		// typed ops (count > 0), leaving them nil otherwise so the optional RLP header
+		// fields stay absent. Encode "absent" as an all-zero root with count 0 — sound
+		// because op-geth never sets the root with a zero count, so the decoder can
+		// recover nil-ness exactly (nil-ness is hash-relevant: CheckBlockHash folds these
+		// pointers into the reconstructed header).
+		if payload.TypedOpRoot != nil && payload.TypedOpCount != nil {
+			copy(buf[offset:offset+32], (*payload.TypedOpRoot)[:])
+			offset += 32
+			binary.LittleEndian.PutUint64(buf[offset:offset+8], uint64(*payload.TypedOpCount))
+			offset += 8
+		} else {
+			// zero root + zero count == absent. Zero explicitly: buf comes from a pool and
+			// may hold stale bytes, so skipping the write would serialize garbage.
+			clear(buf[offset : offset+32+8])
+			offset += 32 + 8
+		}
 	}
 
 	if payload.Withdrawals != nil && offset != fixedSize {
@@ -361,6 +416,28 @@ func (payload *ExecutionPayload) UnmarshalSSZ(version BlockVersion, scope uint32
 		copy(withdrawalsRoot[:], buf[offset:offset+32])
 		payload.WithdrawalsRoot = &withdrawalsRoot
 		offset += 32
+	}
+
+	if version.HasAGNT2Fields() {
+		interactionRoot := common.Hash{}
+		copy(interactionRoot[:], buf[offset:offset+32])
+		payload.InteractionRoot = &interactionRoot
+		offset += 32
+		interactionCount := Uint64Quantity(binary.LittleEndian.Uint64(buf[offset : offset+8]))
+		payload.InteractionCount = &interactionCount
+		offset += 8
+
+		typedOpRoot := common.Hash{}
+		copy(typedOpRoot[:], buf[offset:offset+32])
+		offset += 32
+		typedOpCount := Uint64Quantity(binary.LittleEndian.Uint64(buf[offset : offset+8]))
+		offset += 8
+		// count == 0 means the producer had no typed ops and left both fields nil; keep
+		// them nil so the reconstructed header hashes identically (see MarshalSSZ).
+		if typedOpCount > 0 {
+			payload.TypedOpRoot = &typedOpRoot
+			payload.TypedOpCount = &typedOpCount
+		}
 	}
 
 	_ = offset // for future extensions: we keep the offset accurate for extensions

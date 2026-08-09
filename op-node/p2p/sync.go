@@ -752,7 +752,9 @@ func readExecutionPayload(version uint32, data []byte, isCanyon, isIsthmus bool)
 		envelope := &eth.ExecutionPayloadEnvelope{}
 		blockVersion := eth.BlockV3
 		if isIsthmus {
-			blockVersion = eth.BlockV4
+			// On the AGNT2 fork the Isthmus tag also activates the AGNT2 header
+			// extensions, so Isthmus payloads are BlockV5.
+			blockVersion = eth.BlockV5
 		}
 		if err := envelope.UnmarshalSSZ(blockVersion, uint32(len(data)), bytes.NewReader(data)); err != nil {
 			return nil, fmt.Errorf("failed to decode execution payload envelope response: %w", err)

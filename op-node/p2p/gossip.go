@@ -88,6 +88,15 @@ func blocksTopicV4(cfg *rollup.Config) string {
 	return fmt.Sprintf("/optimism/%s/3/blocks", cfg.L2ChainID.String())
 }
 
+// blocksTopicV5 carries eth.BlockV5 payloads: V4 plus the AGNT2 header extensions
+// (InteractionRoot/Count, TypedOpRoot/Count), which the block hash commits to. It is a
+// SEPARATE topic rather than a widening of blocksV4 on purpose: a V5 payload is not
+// decodable by an upstream op-node expecting V4, so sharing the V4 topic name would make
+// this fork silently wire-incompatible with upstream under the same identifier.
+func blocksTopicV5(cfg *rollup.Config) string {
+	return fmt.Sprintf("/optimism/%s/4/blocks", cfg.L2ChainID.String())
+}
+
 // BuildSubscriptionFilter builds a simple subscription filter,
 // to help protect against peers spamming useless subscriptions.
 func BuildSubscriptionFilter(cfg *rollup.Config) pubsub.SubscriptionFilter {
@@ -95,7 +104,8 @@ func BuildSubscriptionFilter(cfg *rollup.Config) pubsub.SubscriptionFilter {
 		blocksTopicV1(cfg),
 		blocksTopicV2(cfg),
 		blocksTopicV3(cfg),
-		blocksTopicV4(cfg), // add more topics here in the future, if any.
+		blocksTopicV4(cfg),
+		blocksTopicV5(cfg), // add more topics here in the future, if any.
 	)
 }
 
@@ -509,6 +519,7 @@ type publisher struct {
 	blocksV2 *blockTopic
 	blocksV3 *blockTopic
 	blocksV4 *blockTopic
+	blocksV5 *blockTopic
 
 	runCfg GossipRuntimeConfig
 }
@@ -553,6 +564,10 @@ func (p *publisher) BlocksTopicV3Peers() []peer.ID {
 
 func (p *publisher) BlocksTopicV4Peers() []peer.ID {
 	return p.blocksV4.topic.ListPeers()
+}
+
+func (p *publisher) BlocksTopicV5Peers() []peer.ID {
+	return p.blocksV5.topic.ListPeers()
 }
 
 func (p *publisher) PublishSignedL2Payload(ctx context.Context, signedEnvelope *opsigner.SignedExecutionPayloadEnvelope) error {
@@ -617,7 +632,9 @@ func (p *publisher) publishRawSignedPayload(ctx context.Context, timestamp uint6
 	out := snappy.Encode(nil, data)
 
 	if p.cfg.IsIsthmus(timestamp) {
-		return p.blocksV4.topic.Publish(ctx, out)
+		// On the AGNT2 fork the Isthmus tag also activates the AGNT2 header extensions, so
+		// every Isthmus block is a BlockV5 payload and must go out on the V5 topic.
+		return p.blocksV5.topic.Publish(ctx, out)
 	} else if p.cfg.IsEcotone(timestamp) {
 		return p.blocksV3.topic.Publish(ctx, out)
 	} else if p.cfg.IsCanyon(timestamp) {
@@ -669,6 +686,14 @@ func JoinGossip(self peer.ID, ps *pubsub.PubSub, log log.Logger, cfg *rollup.Con
 		return nil, fmt.Errorf("failed to setup blocks v4 p2p: %w", err)
 	}
 
+	v5Logger := log.New("topic", "blocksV5")
+	blocksV5Validator := guardGossipValidator(log, logValidationResult(self, "validated blockv5", v5Logger, BuildBlocksValidator(v5Logger, cfg, runCfg, eth.BlockV5, gossipConf, clk)))
+	blocksV5, err := newBlockTopic(p2pCtx, blocksTopicV5(cfg), ps, v5Logger, gossipIn, blocksV5Validator)
+	if err != nil {
+		p2pCancel()
+		return nil, fmt.Errorf("failed to setup blocks v5 p2p: %w", err)
+	}
+
 	return &publisher{
 		log:       log,
 		cfg:       cfg,
@@ -677,6 +702,7 @@ func JoinGossip(self peer.ID, ps *pubsub.PubSub, log log.Logger, cfg *rollup.Con
 		blocksV2:  blocksV2,
 		blocksV3:  blocksV3,
 		blocksV4:  blocksV4,
+		blocksV5:  blocksV5,
 		runCfg:    runCfg,
 	}, nil
 }
