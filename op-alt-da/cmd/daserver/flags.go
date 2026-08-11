@@ -94,7 +94,7 @@ var (
 	}
 	CelestiaNamespaceFlag = &cli.StringFlag{
 		Name:    CelestiaNamespaceFlagName,
-		Usage:   "celestia namespace, as hex or base64; inputs of 10 bytes or fewer are padded into a version-0 namespace",
+		Usage:   "celestia namespace as hex (0x optional), or base64 behind an explicit \"base64:\" prefix; inputs of 10 bytes or fewer are padded into a version-0 namespace",
 		Value:   "",
 		EnvVars: prefixEnvVars("CELESTIA_NAMESPACE"),
 	}

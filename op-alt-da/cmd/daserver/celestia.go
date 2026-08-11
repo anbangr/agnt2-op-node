@@ -144,6 +144,16 @@ func (s *CelestiaStore) Get(ctx context.Context, key []byte) ([]byte, error) {
 	if err := s.call(ctx, "da.Get", []any{ids, s.namespace}, &blobs); err != nil {
 		return nil, fmt.Errorf("celestia da.Get (%d ids): %w", len(ids), err)
 	}
+	// A short read must NOT be concatenated and returned. Nothing downstream would catch it:
+	// the alt-DA HTTP server writes store bytes straight to the response without checking
+	// them, and a Celestia backend runs in generic-commitment mode where
+	// GenericCommitment.Verify returns nil unconditionally. So a missing blob would reach
+	// op-node as a COMPLETE-looking but truncated batch and corrupt derivation silently.
+	// Failing here instead surfaces as "not available", which op-node already handles.
+	if len(blobs) != len(ids) {
+		return nil, fmt.Errorf("celestia da.Get returned %d blobs for %d ids (key %x): refusing to return a truncated batch",
+			len(blobs), len(ids), key)
+	}
 	var out []byte
 	for i, b := range blobs {
 		chunk, err := unb64(b)
@@ -219,19 +229,27 @@ func b64(b []byte) string { return base64.StdEncoding.EncodeToString(b) }
 func unb64(s string) ([]byte, error) { return base64.StdEncoding.DecodeString(s) }
 
 // ParseCelestiaNamespace normalises an operator-supplied namespace to the base64 form the node
-// RPC expects, accepting either hex (the form Celestia docs and explorers use) or base64 (the
-// form the RPC uses). It validates the v0 layout rather than passing bytes through, because a
+// RPC expects. It validates the v0 layout rather than passing bytes through, because a
 // malformed namespace does not fail at config time -- it fails later as a submit error, or
 // worse, succeeds against a namespace nobody is reading.
+//
+// Input is HEX (optionally 0x-prefixed), with an explicit "base64:" prefix as the escape
+// hatch. Accepting both encodings by sniffing would be silently wrong: "61676e7432777331"
+// decodes as 8 bytes of hex AND as 12 bytes of base64, so a sniffing parser sends data to a
+// different namespace than the operator wrote, and every read comes back empty with no error
+// anywhere. Hex is the form Celestia docs and explorers use, so it is the default.
 func ParseCelestiaNamespace(s string) (string, error) {
 	if s == "" {
 		return "", fmt.Errorf("namespace is empty")
 	}
-	raw, err := hex.DecodeString(strings.TrimPrefix(s, "0x"))
-	if err != nil {
-		if raw, err = base64.StdEncoding.DecodeString(s); err != nil {
-			return "", fmt.Errorf("namespace %q is neither hex nor base64", s)
+	var raw []byte
+	var err error
+	if b64Str, ok := strings.CutPrefix(s, "base64:"); ok {
+		if raw, err = base64.StdEncoding.DecodeString(b64Str); err != nil {
+			return "", fmt.Errorf("namespace %q is not valid base64: %w", b64Str, err)
 		}
+	} else if raw, err = hex.DecodeString(strings.TrimPrefix(s, "0x")); err != nil {
+		return "", fmt.Errorf("namespace %q is not valid hex (prefix with \"base64:\" to supply base64): %w", s, err)
 	}
 	// A short input is treated as just the 10-byte user ID and padded into a v0 namespace, so
 	// operators can write --celestia.namespace agnt2ws1 instead of 58 hex characters.

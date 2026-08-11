@@ -6,6 +6,11 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/hex"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"testing"
 	"time"
@@ -25,14 +30,33 @@ func TestParseCelestiaNamespace(t *testing.T) {
 	require.Equal(t, byte(0), raw[0], "padded namespaces must be version 0")
 	require.Equal(t, []byte("agnt2ws1"), raw[celestiaNamespaceLen-8:], "ID must be right-aligned")
 
-	// A full 29-byte namespace passes through unchanged, in either encoding.
+	// A full 29-byte namespace passes through unchanged, via hex or the explicit base64 form.
 	full := make([]byte, celestiaNamespaceLen)
 	copy(full[celestiaNamespaceLen-4:], []byte("abcd"))
 	fromHex, err := ParseCelestiaNamespace(hex.EncodeToString(full))
 	require.NoError(t, err)
-	fromB64, err := ParseCelestiaNamespace(base64.StdEncoding.EncodeToString(full))
+	fromPrefixed, err := ParseCelestiaNamespace("base64:" + base64.StdEncoding.EncodeToString(full))
 	require.NoError(t, err)
-	require.Equal(t, fromHex, fromB64, "hex and base64 inputs must normalise identically")
+	require.Equal(t, fromHex, fromPrefixed, "both spellings must normalise identically")
+	from0x, err := ParseCelestiaNamespace("0x" + hex.EncodeToString(full))
+	require.NoError(t, err)
+	require.Equal(t, fromHex, from0x)
+
+	// Encoding is NOT sniffed. "abcdef12" is simultaneously valid hex (4 bytes) and valid
+	// base64 (6 bytes), and BOTH readings are short enough to be accepted -- so a sniffing
+	// parser would silently pick one, write to a namespace the operator never named, and
+	// every read would come back empty with no error raised anywhere.
+	const ambiguous = "abcdef12"
+	asHex, err := ParseCelestiaNamespace(ambiguous)
+	require.NoError(t, err)
+	asB64, err := ParseCelestiaNamespace("base64:" + ambiguous)
+	require.NoError(t, err)
+	require.NotEqual(t, asHex, asB64,
+		"both encodings parse but mean different namespaces, which is exactly why sniffing is unsafe")
+
+	// Base64-only input without the prefix must be rejected, not silently mis-decoded.
+	_, err = ParseCelestiaNamespace(base64.StdEncoding.EncodeToString(full))
+	require.ErrorContains(t, err, "not valid hex")
 
 	// Rejections that would otherwise surface only as a failed submit, or as a silent write
 	// into a namespace nobody reads.
@@ -57,6 +81,49 @@ func TestCelestiaStoreGetMissingKeyIsNotFound(t *testing.T) {
 	require.NoError(t, err)
 	_, err = s.Get(context.Background(), []byte("never-written"))
 	require.ErrorIs(t, err, altda.ErrNotFound)
+}
+
+// TestCelestiaStoreGetRefusesTruncatedBatch covers the one silent-corruption path in this
+// backend. Nothing downstream would catch a short read: the alt-DA HTTP server writes store
+// bytes straight to the response without inspecting them, and a Celestia backend runs in
+// generic-commitment mode where GenericCommitment.Verify returns nil unconditionally. So if
+// da.Get returned fewer blobs than were requested, op-node would receive a truncated batch
+// that looks complete.
+func TestCelestiaStoreGetRefusesTruncatedBatch(t *testing.T) {
+	var method string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Method string `json:"method"`
+		}
+		body, _ := io.ReadAll(r.Body)
+		require.NoError(t, json.Unmarshal(body, &req))
+		method = req.Method
+		switch req.Method {
+		case "da.Submit":
+			// Two IDs for one Put, as a multi-blob submission would produce.
+			fmt.Fprint(w, `{"jsonrpc":"2.0","id":1,"result":["aWQx","aWQy"]}`)
+		case "da.Get":
+			// Only ONE blob comes back for the two IDs: the short read.
+			fmt.Fprintf(w, `{"jsonrpc":"2.0","id":1,"result":[%q]}`,
+				base64.StdEncoding.EncodeToString([]byte("first-half-only")))
+		default:
+			t.Fatalf("unexpected method %q", req.Method)
+		}
+	}))
+	defer srv.Close()
+
+	s, err := NewCelestiaStore(srv.URL, "", "AAAA", t.TempDir(), 1)
+	require.NoError(t, err)
+	ctx := context.Background()
+	key := []byte("truncation-key")
+
+	require.NoError(t, s.Put(ctx, key, []byte("some batch")))
+	require.Equal(t, "da.Submit", method)
+
+	got, err := s.Get(ctx, key)
+	require.Error(t, err, "a short read must be an error, never a partial batch")
+	require.ErrorContains(t, err, "truncated")
+	require.Nil(t, got, "no bytes may be handed back when the read was short")
 }
 
 // TestCelestiaStoreRoundTripLive is the Phase 0 kill-gate: a blob must round-trip through this
