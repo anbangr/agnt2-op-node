@@ -39,6 +39,19 @@ func StartDAServer(cliCtx *cli.Context) error {
 			return fmt.Errorf("failed to create S3 store: %w", err)
 		}
 		store = s3
+	} else if cfg.CelestiaEnabled() {
+		ns, err := ParseCelestiaNamespace(cfg.CelestiaNamespace)
+		if err != nil {
+			return fmt.Errorf("invalid celestia namespace: %w", err)
+		}
+		l.Info("Using Celestia storage", "rpc", cfg.CelestiaRPC, "namespace", ns,
+			"index", cfg.CelestiaIndexDir, "max_inflight", cfg.CelestiaMaxInflight)
+		cel, err := NewCelestiaStore(cfg.CelestiaRPC, cfg.CelestiaAuthToken, ns,
+			cfg.CelestiaIndexDir, cfg.CelestiaMaxInflight)
+		if err != nil {
+			return fmt.Errorf("failed to create Celestia store: %w", err)
+		}
+		store = cel
 	}
 
 	server := altda.NewDAServer(cliCtx.String(ListenAddrFlagName), cliCtx.Int(PortFlagName), store, l, cfg.UseGenericComm)

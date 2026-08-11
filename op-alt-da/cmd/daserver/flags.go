@@ -19,6 +19,12 @@ const (
 	S3AccessKeySecretFlagName = "s3.access-key-secret"
 	FileStorePathFlagName     = "file.path"
 	GenericCommFlagName       = "generic-commitment"
+
+	CelestiaRPCFlagName         = "celestia.rpc"
+	CelestiaAuthTokenFlagName   = "celestia.auth-token"
+	CelestiaNamespaceFlagName   = "celestia.namespace"
+	CelestiaIndexDirFlagName    = "celestia.index-dir"
+	CelestiaMaxInflightFlagName = "celestia.max-inflight"
 )
 
 const EnvVarPrefix = "OP_ALTDA_SERVER"
@@ -74,6 +80,36 @@ var (
 		Value:   "",
 		EnvVars: prefixEnvVars("S3_ACCESS_KEY_SECRET"),
 	}
+	CelestiaRPCFlag = &cli.StringFlag{
+		Name:    CelestiaRPCFlagName,
+		Usage:   "celestia-node JSON-RPC endpoint, e.g. http://localhost:26658",
+		Value:   "",
+		EnvVars: prefixEnvVars("CELESTIA_RPC"),
+	}
+	CelestiaAuthTokenFlag = &cli.StringFlag{
+		Name:    CelestiaAuthTokenFlagName,
+		Usage:   "bearer token for the celestia-node RPC (omit only if the node runs with --rpc.skip-auth)",
+		Value:   "",
+		EnvVars: prefixEnvVars("CELESTIA_AUTH_TOKEN"),
+	}
+	CelestiaNamespaceFlag = &cli.StringFlag{
+		Name:    CelestiaNamespaceFlagName,
+		Usage:   "celestia namespace, as hex or base64; inputs of 10 bytes or fewer are padded into a version-0 namespace",
+		Value:   "",
+		EnvVars: prefixEnvVars("CELESTIA_NAMESPACE"),
+	}
+	CelestiaIndexDirFlag = &cli.StringFlag{
+		Name:    CelestiaIndexDirFlagName,
+		Usage:   "directory holding the alt-DA key -> celestia blob ID index; must survive restarts or already-submitted batches become unreadable",
+		Value:   "",
+		EnvVars: prefixEnvVars("CELESTIA_INDEX_DIR"),
+	}
+	CelestiaMaxInflightFlag = &cli.IntFlag{
+		Name:    CelestiaMaxInflightFlagName,
+		Usage:   "maximum concurrent submissions; keep at or below celestia-node's --tx.worker.accounts, since a single signing account serialises PayForBlobs regardless",
+		Value:   1,
+		EnvVars: prefixEnvVars("CELESTIA_MAX_INFLIGHT"),
+	}
 )
 
 var requiredFlags = []cli.Flag{
@@ -88,6 +124,11 @@ var optionalFlags = []cli.Flag{
 	S3AccessKeyIDFlag,
 	S3AccessKeySecretFlag,
 	GenericCommFlag,
+	CelestiaRPCFlag,
+	CelestiaAuthTokenFlag,
+	CelestiaNamespaceFlag,
+	CelestiaIndexDirFlag,
+	CelestiaMaxInflightFlag,
 }
 
 func init() {
@@ -105,6 +146,12 @@ type CLIConfig struct {
 	S3AccessKeyID     string
 	S3AccessKeySecret string
 	UseGenericComm    bool
+
+	CelestiaRPC         string
+	CelestiaAuthToken   string
+	CelestiaNamespace   string
+	CelestiaIndexDir    string
+	CelestiaMaxInflight int
 }
 
 func ReadCLIConfig(ctx *cli.Context) CLIConfig {
@@ -115,20 +162,46 @@ func ReadCLIConfig(ctx *cli.Context) CLIConfig {
 		S3AccessKeyID:     ctx.String(S3AccessKeyIDFlagName),
 		S3AccessKeySecret: ctx.String(S3AccessKeySecretFlagName),
 		UseGenericComm:    ctx.Bool(GenericCommFlagName),
+
+		CelestiaRPC:         ctx.String(CelestiaRPCFlagName),
+		CelestiaAuthToken:   ctx.String(CelestiaAuthTokenFlagName),
+		CelestiaNamespace:   ctx.String(CelestiaNamespaceFlagName),
+		CelestiaIndexDir:    ctx.String(CelestiaIndexDirFlagName),
+		CelestiaMaxInflight: ctx.Int(CelestiaMaxInflightFlagName),
 	}
 }
 
 func (c CLIConfig) Check() error {
-	if !c.S3Enabled() && !c.FileStoreEnabled() {
+	enabled := 0
+	for _, on := range []bool{c.S3Enabled(), c.FileStoreEnabled(), c.CelestiaEnabled()} {
+		if on {
+			enabled++
+		}
+	}
+	if enabled == 0 {
 		return errors.New("at least one storage backend must be enabled")
 	}
-	if c.S3Enabled() && c.FileStoreEnabled() {
+	if enabled > 1 {
 		return errors.New("only one storage backend can be enabled")
 	}
 	if c.S3Enabled() && (c.S3Bucket == "" || c.S3Endpoint == "" || c.S3AccessKeyID == "" || c.S3AccessKeySecret == "") {
 		return errors.New("all S3 flags must be set")
 	}
+	if c.CelestiaEnabled() {
+		if c.CelestiaNamespace == "" {
+			return fmt.Errorf("--%s is required when celestia storage is enabled", CelestiaNamespaceFlagName)
+		}
+		// Without a durable index, a restart orphans every batch already on Celestia: the
+		// blobs remain, but nothing maps an alt-DA key back to them.
+		if c.CelestiaIndexDir == "" {
+			return fmt.Errorf("--%s is required when celestia storage is enabled", CelestiaIndexDirFlagName)
+		}
+	}
 	return nil
+}
+
+func (c CLIConfig) CelestiaEnabled() bool {
+	return c.CelestiaRPC != ""
 }
 
 func (c CLIConfig) S3Enabled() bool {
