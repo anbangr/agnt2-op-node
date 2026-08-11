@@ -206,9 +206,22 @@ func TestSequencerFailover_AGNT2TypedOpsSealedAndPropagate(t *testing.T) {
 		"sealed block #%d must carry a non-nil typedOpRoot (raw header: %v)", blockNum, raw)
 	require.NotNil(t, raw["typedOpCount"])
 	require.NotEqual(t, "0x0", raw["typedOpCount"], "typedOpCount must be > 0")
-	t.Logf("TYPED-OP SEALED: block #%d typedOpRoot=%v typedOpCount=%v interactionRoot=%v interactionCount=%v",
+	// NON-VACUITY FOR THE B2' CL FIX: this block must also carry typedReexecRoot/Count.
+	// FoldTypedReexecRoot appends a leaf for every INVOKE with no skip path, so a block
+	// holding a typed op necessarily has them -- and those two fields are hash-relevant but
+	// were, until the payload carried them, invisible to op-node. Without this assertion the
+	// propagation checks below would still pass on an op-geth predating B2' Stage 2, and
+	// would say nothing about whether op-node can hash a real typed-op block.
+	require.NotNil(t, raw["typedReexecRoot"],
+		"sealed block #%d must carry typedReexecRoot, else the propagation checks below say nothing about whether op-node can hash a real typed-op block (raw header: %v)",
+		blockNum, raw)
+	require.NotEqual(t, "0x0", raw["typedReexecCount"], "typedReexecCount must be > 0")
+	t.Logf("REEXEC-COVERAGE: block #%d carries typedReexecRoot=%v count=%v — the B2' CL fix is exercised",
+		blockNum, raw["typedReexecRoot"], raw["typedReexecCount"])
+	t.Logf("TYPED-OP SEALED: block #%d typedOpRoot=%v typedOpCount=%v interactionRoot=%v interactionCount=%v typedReexecRoot=%v typedReexecCount=%v",
 		blockNum, raw["typedOpRoot"], raw["typedOpCount"],
-		raw["interactionRoot"], raw["interactionCount"])
+		raw["interactionRoot"], raw["interactionCount"],
+		raw["typedReexecRoot"], raw["typedReexecCount"])
 
 	// (5) Cross-check the fold locally: the header commitment is the MMR over the
 	//     block's typed tx hashes, not an opaque value the sequencer made up.

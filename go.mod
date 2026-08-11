@@ -277,7 +277,7 @@ require (
 	lukechampine.com/blake3 v1.3.0 // indirect
 )
 
-replace github.com/ethereum/go-ethereum => github.com/anbangr/agnt2-op-geth v1.101702.2-0.20260809102903-4224379f4a76
+replace github.com/ethereum/go-ethereum => github.com/anbangr/agnt2-op-geth v1.101702.2-0.20260810065235-19796a043874
 
 // replace github.com/ethereum/go-ethereum => ../op-geth
 
