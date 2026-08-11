@@ -144,12 +144,15 @@ func (s *CelestiaStore) Get(ctx context.Context, key []byte) ([]byte, error) {
 	if err := s.call(ctx, "da.Get", []any{ids, s.namespace}, &blobs); err != nil {
 		return nil, fmt.Errorf("celestia da.Get (%d ids): %w", len(ids), err)
 	}
-	// A short read must NOT be concatenated and returned. Nothing downstream would catch it:
-	// the alt-DA HTTP server writes store bytes straight to the response without checking
-	// them, and a Celestia backend runs in generic-commitment mode where
-	// GenericCommitment.Verify returns nil unconditionally. So a missing blob would reach
-	// op-node as a COMPLETE-looking but truncated batch and corrupt derivation silently.
-	// Failing here instead surfaces as "not available", which op-node already handles.
+	// A short read must NOT be concatenated and returned. The alt-DA HTTP server writes store
+	// bytes straight to the response without inspecting them, so whether truncation is caught
+	// depends on the commitment mode: keccak commitments are re-derived by the client, but
+	// under GENERIC commitments -- the mode meant for third-party DA layers like this one --
+	// GenericCommitment.Verify returns nil unconditionally and nothing checks anything. A
+	// missing blob would then reach op-node as a COMPLETE-looking but truncated batch and
+	// corrupt derivation silently. Correctness here must not depend on how the operator
+	// configured commitments, so the check lives in the store. Failing instead surfaces as
+	// "not available", which op-node already handles.
 	if len(blobs) != len(ids) {
 		return nil, fmt.Errorf("celestia da.Get returned %d blobs for %d ids (key %x): refusing to return a truncated batch",
 			len(blobs), len(ids), key)
