@@ -74,6 +74,8 @@ type RPCHeader struct {
 	InteractionCount *hexutil.Uint64 `json:"interactionCount,omitempty" rlp:"optional"`
 	TypedOpRoot      *common.Hash    `json:"typedOpRoot,omitempty" rlp:"optional"`
 	TypedOpCount     *hexutil.Uint64 `json:"typedOpCount,omitempty" rlp:"optional"`
+	TypedReexecRoot  *common.Hash    `json:"typedReexecRoot,omitempty" rlp:"optional"`
+	TypedReexecCount *hexutil.Uint64 `json:"typedReexecCount,omitempty" rlp:"optional"`
 
 	// untrusted info included by RPC, may have to be checked
 	Hash common.Hash `json:"hash"`
@@ -137,6 +139,8 @@ func (hdr *RPCHeader) CreateGethHeader() *types.Header {
 		InteractionCount: (*uint64)(hdr.InteractionCount),
 		TypedOpRoot:      hdr.TypedOpRoot,
 		TypedOpCount:     (*uint64)(hdr.TypedOpCount),
+		TypedReexecRoot:  hdr.TypedReexecRoot,
+		TypedReexecCount: (*uint64)(hdr.TypedReexecCount),
 	}
 }
 

@@ -89,7 +89,11 @@ func blocksTopicV4(cfg *rollup.Config) string {
 }
 
 // blocksTopicV5 carries eth.BlockV5 payloads: V4 plus the AGNT2 header extensions
-// (InteractionRoot/Count, TypedOpRoot/Count), which the block hash commits to. It is a
+// (InteractionRoot/Count, TypedOpRoot/Count, TypedReexecRoot/Count), which the block hash
+// commits to. The re-exec pair joined this version rather than forcing a V6 topic, because
+// BlockV5 is fork-local and unshipped; the cost is that two builds of THIS fork straddling
+// that change cannot decode each other, which surfaces as an SSZ length error rather than as
+// a bad block. It is a
 // SEPARATE topic rather than a widening of blocksV4 on purpose: a V5 payload is not
 // decodable by an upstream op-node expecting V4, so sharing the V4 topic name would make
 // this fork silently wire-incompatible with upstream under the same identifier.

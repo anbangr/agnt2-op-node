@@ -19,12 +19,20 @@ const ( // iota is reset to 0
 	BlockV2
 	BlockV3
 	BlockV4
-	// BlockV5 is V4 plus the AGNT2 header extensions (InteractionRoot/Count,
-	// TypedOpRoot/Count). These are committed to by the block hash (see
-	// ExecutionPayload.CheckBlockHash), so they MUST be on the wire — without them a
-	// receiver recomputes a different block hash than the producer sealed and rejects
-	// every payload. op-geth sets InteractionRoot/Count on every block once the AGNT2
-	// (Optimism Isthmus) fork tag is active.
+	// BlockV5 is V4 plus the AGNT2 header extensions: InteractionRoot/Count,
+	// TypedOpRoot/Count, and TypedReexecRoot/Count. All six are committed to by the block
+	// hash (see ExecutionPayload.CheckBlockHash), so they MUST be on the wire — without
+	// them a receiver recomputes a different block hash than the producer sealed and
+	// rejects every payload. op-geth sets InteractionRoot/Count on every block once the
+	// AGNT2 (Optimism Isthmus) fork tag is active.
+	//
+	// The re-exec pair was added to this same version rather than to a V6. BlockV5 is
+	// fork-local — it exists only in this tree, no external peer speaks it, and it has
+	// never been deployed — so a second AGNT2 payload version would buy no compatibility
+	// and would cost a duplicate gossip topic, a second sync path and a second raft decode
+	// path to keep in step. The tradeoff is that V5 bytes written by an older build of this
+	// fork no longer decode; that surfaces as a loud decode error, not as silent
+	// corruption, and only ephemeral devnet state is ever encoded this way.
 	BlockV5
 )
 
@@ -65,11 +73,12 @@ const (
 	// V3 + WithdrawalsRoot
 	blockV4FixedPart = blockV3FixedPart + 32
 
-	// V4 + InteractionRoot + InteractionCount + TypedOpRoot + TypedOpCount.
-	// All four are fixed-size and appended at the END of the fixed part, so the dynamic
+	// V4 + InteractionRoot + InteractionCount + TypedOpRoot + TypedOpCount
+	//    + TypedReexecRoot + TypedReexecCount.
+	// All six are fixed-size and appended at the END of the fixed part, so the dynamic
 	// offsets (ExtraData / Transactions / Withdrawals), which are all derived from
 	// fixedSize, shift automatically and need no separate arithmetic.
-	blockV5FixedPart = blockV4FixedPart + 32 + 8 + 32 + 8
+	blockV5FixedPart = blockV4FixedPart + 32 + 8 + 32 + 8 + 32 + 8
 
 	withdrawalSize = 8 + 8 + 20 + 8
 
@@ -283,6 +292,19 @@ func (payload *ExecutionPayload) MarshalSSZ(w io.Writer) (n int, err error) {
 			clear(buf[offset : offset+32+8])
 			offset += 32 + 8
 		}
+		// TypedReexecRoot/Count (B2' Stage 2) are optional on the same terms, and are set
+		// independently of TypedOpRoot: op-geth stamps them when the typed RE-EXECUTION
+		// fold yields a leaf, which a block can do while some other typed op is skipped.
+		// Same absent encoding, same reasoning about the pooled buffer.
+		if payload.TypedReexecRoot != nil && payload.TypedReexecCount != nil {
+			copy(buf[offset:offset+32], (*payload.TypedReexecRoot)[:])
+			offset += 32
+			binary.LittleEndian.PutUint64(buf[offset:offset+8], uint64(*payload.TypedReexecCount))
+			offset += 8
+		} else {
+			clear(buf[offset : offset+32+8])
+			offset += 32 + 8
+		}
 	}
 
 	if payload.Withdrawals != nil && offset != fixedSize {
@@ -437,6 +459,16 @@ func (payload *ExecutionPayload) UnmarshalSSZ(version BlockVersion, scope uint32
 		if typedOpCount > 0 {
 			payload.TypedOpRoot = &typedOpRoot
 			payload.TypedOpCount = &typedOpCount
+		}
+
+		typedReexecRoot := common.Hash{}
+		copy(typedReexecRoot[:], buf[offset:offset+32])
+		offset += 32
+		typedReexecCount := Uint64Quantity(binary.LittleEndian.Uint64(buf[offset : offset+8]))
+		offset += 8
+		if typedReexecCount > 0 {
+			payload.TypedReexecRoot = &typedReexecRoot
+			payload.TypedReexecCount = &typedReexecCount
 		}
 	}
 
